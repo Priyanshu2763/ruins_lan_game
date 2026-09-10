@@ -1,0 +1,18 @@
+# Dependencies — reinstalled from package.json/package-lock.json, never committed
+node_modules/
+
+# Runtime/process logs (pm2, npm)
+*.log
+npm-debug.log*
+.pm2/
+
+# Environment/secrets
+.env
+.env.*
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

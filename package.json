@@ -1,0 +1,14 @@
+{
+  "name": "ruins-fpp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "three": "^0.169.0",
+    "ws": "^8.18.0"
+  }
+}
