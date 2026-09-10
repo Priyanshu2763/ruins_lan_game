@@ -318,14 +318,75 @@ function buildCrenellations({ x, z, w, d, wallH, color }) {
   return chunks;
 }
 
+// One exterior staircase, climbing along X (for a wall that runs east-west, unlike every
+// house stair which climbs along Z alongside a north-south wall) — same closed-except-the-
+// climbing-face logic: an outer long wall (the far side, away from the building) plus a "back"
+// wall blocking approach to the high end from beyond it, mirroring makeRuinHouse's stairs
+// exactly, just with the axes swapped. Returns a ramp (axis:'x') and its barrier walls. Unlike
+// the house stairs, the building's own wall at the high end does NOT need a matching gap —
+// the platform-priority fix in surfaceHeightAt (client.js) already snaps a climbing player to
+// full height as soon as their climb state triggers, well before they'd reach that wall, so
+// it can stay fully solid and still get crossed via height alone.
+function makeMansionStair({ climbLow, climbHigh, outerZ, stairWidth, toY, color }) {
+  const stairZ = outerZ + stairWidth / 2;
+  const dir = climbHigh > climbLow ? 1 : -1;
+  const climbCenter = (climbLow + climbHigh) / 2, climbSpan = Math.abs(climbHigh - climbLow);
+  const ramp = { x: climbCenter, z: stairZ, w: climbSpan, d: stairWidth, fromY: 0, toY, axis: 'x', reverse: dir < 0 };
+  const barrierH = 4.5, barrierT = 0.3;
+  const outerWall = { x: climbCenter, y: barrierH / 2, z: stairZ + stairWidth / 2 + barrierT / 2, w: climbSpan, h: barrierH, d: barrierT, color };
+  const backX = climbHigh + dir * (0.45 + barrierT / 2);
+  const backWall = { x: backX, y: barrierH / 2, z: stairZ, w: barrierT, h: barrierH, d: stairWidth + barrierT * 2, color };
+  return { ramp, walls: [outerWall, backWall] };
+}
+
 function makeMansion({ x, z, w = 26, d = 22, wallH = 6.0, wallT = 0.9, color, doorColor }) {
   const hw = w / 2, hd = d / 2;
   const doorGapW = 6, crackW = w * 0.3;
+
+  // Computed once and shared by the roof, the rooftop platform, and both stairs' climb target
+  // — a climbing player needs to land EXACTLY at/above the roof's own top surface, and
+  // computing that same value two different ways (even arithmetically equivalent ones, like
+  // (wallH+0.15)+0.15 vs wallH+0.3) can differ by a floating-point epsilon. That's a real bug
+  // this hit: the platform handed back 6.3, the roof's true top computed out to
+  // 6.300000000000001, and "is my height below the roof's underside" came out true by that
+  // sliver — blocked by a ceiling a climbing player was already standing flush against. The
+  // +0.01 on the platform/stairs isn't just belt-and-suspenders either — it's real margin
+  // above the roof's surface, not reliance on bit-identical equality staying that way forever.
+  const roofTopY = wallH + 0.3;
+  const climbTargetY = roofTopY + 0.01;
+
+  // Two stairs climb the OUTSIDE of the south wall, one from each side, up to the rooftop —
+  // same "only the front/climbing face is open, everything else is a wall" idea as the house
+  // stairs. The south wall itself stays fully solid (see the big comment further down) —
+  // crossing it relies on height, not a literal opening.
+  const stairWidth = 3, climbSpan = 6;
+  // Outer edge = ground level (0), inner (center-ward) edge = full height — for BOTH stairs,
+  // so they climb TOWARD each other and meet near the middle (a "/|\" silhouette), not both
+  // climbing the same direction. Got this backwards the first time: passed the east stair's
+  // numerically-smaller x-bound as climbLow and larger as climbHigh without checking which end
+  // that actually put the "ground" (0-height) side on — it put it near the CENTER instead of
+  // the outer edge, so both stairs climbed the same way instead of mirroring.
+  const westOuterX = -hw + 3, westInnerX = westOuterX + climbSpan;
+  const eastOuterX = hw - 3, eastInnerX = eastOuterX - climbSpan;
+  const southOuterZ = z + hd;
+  const westStair = makeMansionStair({ climbLow: westOuterX, climbHigh: westInnerX, outerZ: southOuterZ, stairWidth, toY: climbTargetY, color });
+  const eastStair = makeMansionStair({ climbLow: eastOuterX, climbHigh: eastInnerX, outerZ: southOuterZ, stairWidth, toY: climbTargetY, color });
+
+  // The south wall stays FULLY SOLID — no gaps. This used to need one per stair so a
+  // still-climbing player crossing it wouldn't get blocked by a wall taller than their
+  // current height, but that's no longer true: the platform-priority fix (surfaceHeightAt,
+  // client.js) already snaps a climbing player to full height the MOMENT their climb state
+  // triggers, and that trigger fires while they're still on the stair itself, well before
+  // they'd ever reach the wall — so by the time anyone actually gets to this wall, they're
+  // already tall enough to clear it via the same "wall only blocks below its own height" seam
+  // used everywhere else in this project, no literal opening required. A player who hasn't
+  // climbed yet and tries to just walk into this wall is correctly, solidly blocked.
   const walls = [
     ...wallSide({ side: 'north', x, z, w, d, wallT, y: wallH / 2, height: wallH, color, gapLen: doorGapW }),
-    ...wallSide({ side: 'south', x, z, w, d, wallT, y: wallH / 2, height: wallH, color }), // no gap — solid
+    ...wallSide({ side: 'south', x, z, w, d, wallT, y: wallH / 2, height: wallH, color }),
     ...wallSide({ side: 'east', x, z, w, d, wallT, y: wallH / 2, height: wallH, color, gapLen: crackW }),
     ...wallSide({ side: 'west', x, z, w, d, wallT, y: wallH / 2, height: wallH, color, gapLen: crackW }),
+    ...westStair.walls, ...eastStair.walls,
   ];
 
   const towerSize = 3.4, towerH = wallH + 2.6;
@@ -335,20 +396,83 @@ function makeMansion({ x, z, w = 26, d = 22, wallH = 6.0, wallT = 0.9, color, do
     { x: x - towerOffsetX, z: z + towerOffsetZ }, { x: x + towerOffsetX, z: z + towerOffsetZ },
   ].map((t) => ({ x: t.x, y: towerH / 2, z: t.z, w: towerSize, h: towerH, d: towerSize, color }));
 
-  const roof = [{ x, y: wallH + 0.15, z, w, d, h: 0.3, color }];
-
-  // Two decorative door panels in the doorway — neither is collidable (the actual passage is
-  // the wall gap itself, same as every other opening in this game); they're just dressing.
-  // Left half: shut and "locked"-looking but you walk straight through it (a dummy). Right
-  // half: rendered swung open at an angle, sitting just inside the opening.
-  const northWallZ = z - hd + wallT / 2;
-  const panelW = doorGapW / 2 - 0.25, panelH = wallH * 0.8, doorY = panelH / 2;
-  const doorDecor = [
-    { x: x - doorGapW / 4, y: doorY, z: northWallZ, w: panelW, h: panelH, d: 0.15, rotY: 0, color: doorColor },
-    { x: x + doorGapW / 4 - 0.4, y: doorY, z: northWallZ + 0.7, w: panelW, h: panelH, d: 0.15, rotY: 1.05, color: doorColor },
+  // The main roof slab only ever covered the building's own footprint (up to the south wall,
+  // z:[87,109]) — but the WALKABLE area (the platform below) deliberately extends south of
+  // that, past the wall, to reach both stairs' tops. That gap between "where the visible roof
+  // ends" and "where the stairs begin" was a real hole: nothing solid was there at all, just
+  // empty air over the (invisible) extended platform — you could walk it (fine) but a grenade
+  // thrown up through it would sail right through into the room below (not fine), and there
+  // was nothing to look at underfoot up there either.
+  //
+  // Two DIFFERENT fixes for two different spots, not one slab stretched over both:
+  // - Between the stairs (the open center strip, x:[-4,4]): nothing else is visible there at
+  //   all, so a real VISIBLE slab is added, flush against the main roof's own south edge.
+  // - Directly over each stair's own climb path: the sloped/stepped stair mesh
+  //   (buildRampSteps) is ALREADY the visible geometry there — rendering a second, flat slab
+  //   on top of those angled steps is what looked broken (a flat ceiling hovering just above
+  //   the visible stairs, reading as a floating duplicate). So over the stairs, only an
+  //   INVISIBLE collision box is added (renderAs:'invisible') — grenades/bullets still can't
+  //   pass through that space, but nothing extra is drawn over the stair mesh itself.
+  // Both are safe against ceiling-clip because the climb-state trigger was moved to 60% (see
+  // surfaceHeightAt, client.js): a climbing body's head starts clipping a ceiling at this
+  // height at ~66.6% of the climb (computed from PLAYER_HEIGHT), and the OLD 70% trigger fired
+  // after that point — a real stuck-in-place window. With the earlier trigger, height is
+  // already snapped to full well before the climb ever reaches the danger zone.
+  const roofExtD = 5; // south of the original wall edge, comfortably past both stairs' outer ends
+  const roofExtZ = z + hd + roofExtD / 2;
+  const roof = [
+    { x, y: roofTopY - 0.15, z, w, d, h: 0.3, color },
+    { x, y: roofTopY - 0.15, z: z + hd + 1.5, w: 8, h: 0.3, d: 3, color }, // visible, center only
   ];
+  const stairCeilings = [westStair, eastStair].map((s) => ({
+    x: s.ramp.x, y: roofTopY - 0.15, z: roofExtZ, w: s.ramp.w, h: 0.3, d: roofExtD, color, renderAs: 'invisible',
+  }));
+  // The rooftop walkway a climbing player actually stands on. Its footprint is inset from the
+  // walls at the north/east/west (so it reads as a walkway behind the parapet) but EXTENDS
+  // south, past the south wall's own position, to overlap both stairs' high ends — this is
+  // what lets the "climb near the wall, height already ~full, then step north across it"
+  // handoff work without needing the south wall's stair gaps to also stay open at every
+  // height (same seam trick used everywhere else: a wall only blocks while the player's
+  // height is below its own, and it doesn't matter that the wall "gap" here is really just
+  // the platform already claiming that ground before the player would need to cross it).
+  // renderAs:'invisible' — the existing `roof` above already IS the rooftop's visible top
+  // surface (and its own collision blocks bullets/grenades from passing through it from any
+  // angle, same as before); this entry exists purely so surfaceHeightAt/rampHeightAt have
+  // something to hand back once a climbing player's/grenade's state says they're "on" it —
+  // rendering it too would just double up an already-visible slab.
+  const platform = { x, y: climbTargetY, z: z + 2, w: w - 4, d: d + 6, h: 0.25, color, renderAs: 'invisible' };
 
-  return { walls: [...walls, ...towers], decor: [...buildCrenellations({ x, z, w, d, wallH, color }), ...doorDecor], roof };
+  // Both door panels are real collision — walking (or throwing a grenade) straight
+  // through the visible wood was the actual bug, not intended "dummy" behavior. The shut
+  // panel is already axis-aligned (rotY 0), so it can just BE a wall entry directly. The ajar
+  // panel is rotated for its look, and this engine's collision is axis-aligned boxes only (no
+  // rotated hitboxes) — so its visible mesh stays a decor entry (still rendered rotated) and a
+  // SEPARATE invisible box, sized to the rotated panel's actual axis-aligned footprint
+  // (w·|cosθ| + d·|sinθ| and vice versa — the standard AABB of a rotated rectangle), goes in
+  // `walls` instead. `renderAs: 'invisible'` piggybacks on the same tag client.js already uses
+  // to skip drums/tires in the generic box-render pass, so this collision box never draws.
+  // Shut door covers the west half of the opening. Ajar door is swung most of the way open
+  // (80°, not a shallow 60°) and hinged toward the east edge, so its footprint sits close
+  // against the east side rather than a big diagonal slab across the middle — the earlier
+  // 60°-open, doorway-centered version left barely a 1-unit passable sliver once both panels'
+  // (necessarily axis-aligned, since this engine has no rotated collision) bounding boxes were
+  // accounted for. This leaves a comfortable clear middle instead.
+  const northWallZ = z - hd + wallT / 2;
+  const panelW = doorGapW / 2 - 0.25, panelH = wallH * 0.8, doorY = panelH / 2, panelD = 0.15;
+  const shutDoor = { x: x - doorGapW / 4, y: doorY, z: northWallZ, w: panelW, h: panelH, d: panelD, color: doorColor };
+  const ajarX = x + doorGapW / 2 - 0.4, ajarZ = northWallZ + panelW / 2, ajarRotY = 1.4;
+  const ajarVisual = { x: ajarX, y: doorY, z: ajarZ, w: panelW, h: panelH, d: panelD, rotY: ajarRotY, color: doorColor };
+  const ajarCollisionW = panelW * Math.abs(Math.cos(ajarRotY)) + panelD * Math.abs(Math.sin(ajarRotY));
+  const ajarCollisionD = panelW * Math.abs(Math.sin(ajarRotY)) + panelD * Math.abs(Math.cos(ajarRotY));
+  const ajarCollision = { x: ajarX, y: doorY, z: ajarZ, w: ajarCollisionW, h: panelH, d: ajarCollisionD, color: doorColor, renderAs: 'invisible' };
+
+  return {
+    walls: [...walls, ...towers, shutDoor, ajarCollision, ...stairCeilings],
+    decor: [...buildCrenellations({ x, z, w, d, wallH, color }), ajarVisual],
+    roof,
+    platform,
+    ramps: [westStair.ramp, eastStair.ramp],
+  };
 }
 const MANSION = { x: 0, z: 98, w: 26, d: 22 };
 
@@ -408,8 +532,11 @@ export function getMapLayout(mapKey) {
 
   return {
     walls: [...OBSTACLES_BASE, ...houses.flatMap((h) => h.walls), ...mansion.walls, ...mansion.roof, ...bunkers, ...drums, ...tires],
-    platforms: houses.map((h) => h.platform),
-    ramps: houses.map((h) => h.ramp),
+    // ramps[i] <-> platforms[i] must stay index-matched (see client.js's standingPlatformIndex)
+    // — the mansion's platform is duplicated once per its ramp (its two stairs share the one
+    // rooftop) so that correspondence holds for every ramp, houses' and mansion's alike.
+    platforms: [...houses.map((h) => h.platform), mansion.platform, mansion.platform],
+    ramps: [...houses.map((h) => h.ramp), ...mansion.ramps],
     decor: [...houses.flatMap((h) => h.decor), ...mansion.decor],
     grass: EXTENSION_GRASS,
   };

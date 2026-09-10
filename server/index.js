@@ -318,7 +318,30 @@ function handleAttack(player, room, weaponIdx, origin, dir) {
 // ---------- Grenades: server-simulated arc physics + AOE damage on explosion ----------
 let nextGrenadeId = 1;
 const GRENADE_GRAVITY = -20;
-const GRENADE_GROUND_Y = GRENADE_RADIUS;
+// A ramp has no collision box of its own — client.js's surfaceHeightAt is the only thing that
+// knows a staircase has a height at all, and that's player-only. Without this, a grenade lobbed
+// onto a staircase just keeps falling under gravity, right through the (purely visual, non-
+// collidable) steps, down to flat ground level — "grenades fly through the stairs" instead
+// of landing on them like a real floor. Same interpolation math as the client's ramp handling,
+// just without the platform-hysteresis state (a thrown object doesn't need to remember which
+// floor it's "on" the way a walking player does).
+function rampHeightAt(x, z, ramps) {
+  let h = 0;
+  for (const s of ramps) {
+    const hw = s.w / 2, hd = s.d / 2;
+    if (Math.abs(x - s.x) > hw || Math.abs(z - s.z) > hd) continue;
+    // axis:'x' ramps climb along X (a stair running alongside an east-west wall) instead of Z
+    // — mirrors the same addition in client.js's surfaceHeightAt.
+    const isX = s.axis === 'x';
+    const half = isX ? hw : hd;
+    const coord = isX ? x : z;
+    const center = isX ? s.x : s.z;
+    const t = Math.max(0, Math.min(1, (coord - (center - half)) / (half * 2)));
+    const st = s.reverse ? 1 - t : t;
+    h = Math.max(h, s.fromY + (s.toY - s.fromY) * st);
+  }
+  return h;
+}
 
 function throwGrenade(player, room, origin, dir) {
   if (!player.alive) return;
@@ -437,8 +460,9 @@ setInterval(() => {
         g.pos[1] += g.vel[1] * dt;
         g.pos[2] += g.vel[2] * dt;
         resolveGrenadeWallBounce(g, room.physicsObstacles);
-        if (g.pos[1] <= GRENADE_GROUND_Y) {
-          g.pos[1] = GRENADE_GROUND_Y;
+        const localGroundY = GRENADE_RADIUS + rampHeightAt(g.pos[0], g.pos[2], room.ramps);
+        if (g.pos[1] <= localGroundY) {
+          g.pos[1] = localGroundY;
           if (Math.abs(g.vel[1]) > 1) { g.vel[1] *= -0.35; g.vel[0] *= 0.7; g.vel[2] *= 0.7; }
           else { g.vel[0] = 0; g.vel[1] = 0; g.vel[2] = 0; }
         }
@@ -486,6 +510,10 @@ wss.on('connection', (ws) => {
       const layout = getMapLayout(map);
       room.walls = layout.walls;
       room.physicsObstacles = [...layout.walls, ...layout.platforms];
+      room.ramps = layout.ramps; // stairs have no collision BOX of their own (only players'
+      // client-side surfaceHeightAt knows their height) — grenades need their own awareness
+      // of this or they just fall straight through a staircase to the ground below it, see
+      // rampHeightAt below.
       // durationMin === 0 (or missing) means no time limit — matchEndsAt stays null and the
       // client just doesn't show a countdown. Otherwise the match auto-ends and every client
       // gets kicked to the final scoreboard when the timer set at room creation runs out.

@@ -687,3 +687,235 @@ resolves identically to before — not a regression.
 
 Syntax-checked (local + remote), pm2 restarted clean. Only server/index.js changed this batch
 — gameData.js and client.js are unchanged from the last deploy.
+
+## Batch 17 (2026-09-10) — mansion doors made solid, stairs now block grenades as a real floor
+
+Asked the user to clarify two ambiguous points rather than guess again (they'd asked for
+exactly that): which mansion door(s) should be solid, and what "grenade goes through the
+stairs" actually meant given my testing showed the stairs' side/back walls already correctly
+block grenades. Answers: both doors solid; and the real issue is that the STAIRS THEMSELVES
+(the walkable ramp surface) have zero collision presence for grenades at all — a grenade lobbed
+onto a staircase falls straight through the (purely visual, non-collidable) steps to the flat
+ground below, because `ramps` was only ever consulted by the client for PLAYER height
+(surfaceHeightAt) and was never part of the server's grenade-facing obstacle list.
+
+**Mansion doors**: both panels are now real collision. The shut/"locked" panel is already
+axis-aligned (no rotation), so it just became a wall entry directly. The ajar/open panel stays
+visually rotated (~80°, tightened from the original 60° — see below) but this engine has no
+rotated-hitbox support, so its VISUAL stays a decor entry while a separate INVISIBLE
+axis-aligned box (sized via the actual bounding-box-of-a-rotated-rectangle formula:
+w·|cosθ| + d·|sinθ|, and vice versa — not guessed) goes into `walls` for collision only,
+tagged `renderAs: 'invisible'` (reusing the tag client.js already uses to skip drums/tires in
+the generic render pass, so no client-side rendering changes were needed for this part).
+First attempt at the ajar door's angle/position (60°, centered in the doorway) left only about
+a 1-unit passable sliver once both panels' necessarily-boxy hitboxes were accounted for —
+caught this by actually measuring the open width with a script before deploying, not
+eyeballing, and widened the angle to 80° plus repositioning it toward the east edge (closer to
+how a real hinged door swings flush against a wall) — now leaves a genuinely comfortable ~1.5
+unit clear passage, verified numerically.
+
+**Stairs as a real floor for grenades**: added `room.ramps = layout.ramps` at room creation
+and a server-side `rampHeightAt(x, z, ramps)` (server/index.js) — the same interpolation math
+the client's surfaceHeightAt already uses for the ramp portion, just without the platform-
+"which floor am I on" state (a thrown object doesn't need that the way a walking player does —
+platforms were already real collision boxes and worked fine for grenades on their own). The
+grenade physics tick's ground-bounce check now compares against `GRENADE_RADIUS +
+rampHeightAt(...)` instead of a flat ground constant, so a grenade landing anywhere on a
+staircase now correctly rests/bounces at that point's actual stair height instead of falling
+through to y=0. Removed the now-dead `GRENADE_GROUND_Y` constant.
+
+Verified before deploying: measured the mansion doorway's actual open width with a
+padding-aware collision script (1.5 units, comfortably passable); re-ran the full spawn/pickup
+collision check (clean); confirmed both door panels now genuinely block at their real
+positions. Did not re-simulate the ramp-as-floor grenade fix with a full physics trace this
+time (straightforward, mirrors already-verified client logic) — worth a live test.
+
+Syntax-checked (local + remote), pm2 restarted clean, wall count 138 (was 136, +2 = shut door
++ ajar collision box) verified identical on both machines.
+
+## Batch 18 (2026-09-10) — mansion back stairs to the rooftop, two real bugs found and fixed
+
+User drew two red lines on a screenshot of the mansion's back wall: two symmetric staircases
+climbing up from either side, "same logic" as the house stairs (only the climbing face open,
+everything else closed, acts as a real floor for grenades).
+
+**New capability needed first: axis:'x' ramps.** Every ramp so far climbed along Z (houses'
+stairs run alongside a north-south wall). The mansion's back wall runs east-west, so a stair
+alongside it naturally climbs along X instead — the `axis` field already existed on ramp
+objects but was dead (both surfaceHeightAt and rampHeightAt hardcoded Z-based interpolation).
+Implemented properly in both places, plus buildRampSteps (visual stair meshes) — verified this
+doesn't change any existing Z-axis ramp's behavior (regular houses re-tested, identical result
+to before).
+
+**makeMansionStair()**: generates one ramp + its outer wall (blocks the open-field side) + a
+back wall (blocks approaching the high end from beyond it) — direct mirror of the house stairs'
+barrier logic, axes swapped. Two instances (west, east), symmetric. The south wall — previously
+one fully solid piece — is now 3 segments with 2 gaps (wallSide only supports a single centered
+gap, can't express two), one gap per stair, sized with margin around each stair's own x-range.
+
+**Two real bugs found via simulation before deploying, not after:**
+1. Reused the exact "climb, trigger, immediately turn" simulation that caught the house-stairs
+   bugs — it caught a NEW one here: turning toward the building right at the 70% trigger left
+   the player at ~70% height while crossing under the mansion's ROOF, and PLAYER_HEIGHT (1.8)
+   is enough that their head clipped the ceiling's underside from below — a category of bug
+   the house stairs can't have (they don't have a roof overlapping their stairs). Fixed by
+   changing surfaceHeightAt so that once state triggers for a ramp, if the current position is
+   ALSO already within that ramp's platform footprint (true here by the platform's design —
+   see below), it returns the platform's flat height immediately instead of continuing the
+   ramp's gradual interpolation — the last 30% of the climb becomes a snap to full height
+   rather than a slow rise that lingers at head-clipping height. Re-verified this doesn't
+   affect the house stairs (no ceiling there to begin with, confirmed identical behavior).
+2. Even after that fix, still blocked — chased it down to a genuine floating-point precision
+   mismatch: the platform's target height (`wallH + 0.3`) and the roof's computed top surface
+   (`(wallH + 0.15) + 0.15`) are mathematically the same value but came out as 6.3 vs
+   6.300000000000001 — different by one bit, enough for `y < oMaxY` to read true and block a
+   player standing exactly flush against the roof's own underside. Fixed by computing a single
+   shared `roofTopY` once and deriving the roof, the platform, and both stairs' climb target
+   from it, plus a real +0.01 margin (not just bit-identical equality) so this class of bug
+   can't resurface if any of these are ever computed independently again.
+
+The rooftop platform's footprint is deliberately inset from the walls on 3 sides (a proper
+walkway behind the crenellated parapet) but EXTENDS south past the wall itself, overlapping
+both stairs' high ends — this is what makes the "snap to platform height once triggered" fix
+in #1 actually reachable while still on the stair, rather than only after already crossing the
+wall.
+
+Verified with the full test suite before deploying: complete realistic climb-trigger-cross for
+both stairs (clear), descending back down (clear, state correctly resets), a grenade landing
+at multiple points along a stair's climb (smooth 0->6.3 interpolation via the new axis-aware
+rampHeightAt), the regular houses' stairs re-tested for regression (identical, unaffected),
+and the full spawn/pickup collision sweep (clean).
+
+Syntax-checked (local + remote), pm2 restarted clean, wall/platform/ramp counts (144/7/7)
+verified identical on both machines and both themes.
+
+## Batch 19 (2026-09-10) — mansion stairs: fixed direction, made the back wall fully solid
+
+User: wanted the two stairs mirrored, climbing toward each other and meeting near the center
+("/|\"), not both sloping the same way ("\  \"); and the back wall should have zero holes,
+not the two gaps batch 18 cut into it.
+
+**Direction bug**: found it immediately on re-reading the code. The east stair's climbLow/
+climbHigh (which set WHICH end is height-0 vs height-full) were assigned from
+"numerically-smaller-x" / "numerically-larger-x" without checking which end that actually put
+the ground side on — it put the ground (0-height) end near the CENTER and the full-height end
+at the OUTER edge, the opposite of the west stair. Both stairs climbing toward the same side
+looked like the parallel-slope screenshot instead of a mirrored peak. Fixed by defining both
+stairs symmetrically: outer edge = 0 height, inner (center-facing) edge = full height, for
+both — verified with a fresh simulation that each stair's `reverse` flag came out as intended
+(west: false, east: true) and that both now trigger while approaching from their own outer
+edge, climbing toward the middle.
+
+**Solid back wall**: the two gaps existed only to solve a problem that batch 18's
+platform-priority fix already solved a different way. Re-derived this before touching
+anything: the climb-state trigger (70% up) already snaps a player to full height the instant
+it fires, via the platform-priority check added last batch — and that trigger fires while
+still on the stair itself, well before the player is anywhere near the south wall. So by the
+time anyone actually reaches that wall, they're already tall enough to clear it through the
+same "wall only blocks below its own height" mechanism used everywhere else in this project —
+no literal opening needed. Removed both gaps; the south wall is back to a single solid
+`wallSide` call with no `gapLen`, matching every other unbroken wall in the project.
+
+Verified before deploying: full climb-trigger-cross simulation for both stairs (now approaching
+from each one's own outer edge, matching real play), confirmed the south wall has zero gaps by
+scanning its entire width at ground level, and re-checked the front door (unaffected by this
+batch — a stray test point of mine gave a false "blocked" reading there that turned out to be
+pre-existing padding from batch 17's door collision, not a regression; re-verified against the
+already-known-open x-position to be sure). Spawn/pickup collision check re-run clean on both
+themes.
+
+Syntax-checked (local + remote), pm2 restarted clean. Only gameData.js changed this round —
+client.js and server/index.js are unchanged from the last deploy. Wall count dropped 144->142
+(the two now-removed south-wall gap splits) — verified identical on both machines.
+
+## Batch 20 (2026-09-10): DONE — mansion stair-to-roof gap, both parts (visual + collidable)
+
+Two related fixes to the mansion's back-wall exterior stairs, reported over two rounds of
+screenshot feedback ("connect these two thats it" x2, then "there is no visible path its like
+im in air" once the first fix only closed the CENTER gap, then "add visible floor and also the
+granade shouldnt go through it" clarifying the ask was real collision, not just a visual patch).
+
+**Round 1 (deployed earlier, undocumented until now):** the mansion's visible roof slab only
+ever covered the building's own footprint (up to the south wall) — but the walkable platform
+underneath deliberately extends south past that wall to reach both exterior stairs' tops, so
+there was a real gap between "where the roof visibly ends" and "where the stairs begin," read
+as a floating disconnected box. Fixed with a second roof slab flush against the first, but
+scoped ONLY to the center strip between the two stairs (x:[-4,4]) — deliberately NOT extending
+over either stair's own climb path, because at the time the climb-state trigger (which snaps a
+climbing player to full standing height once they're far enough up a ramp) fired at 70% of the
+climb, and the math showed a real ceiling positioned over either stair would clip a climbing
+player's head starting at ~66.6% of the climb — i.e. BEFORE the old trigger fired, a genuine
+stuck-in-place bug window (not stutter — you can't climb far enough in X to escape a ceiling
+that's already blocking you before you're tall enough to clear it).
+
+**Round 2 (this batch):** center-only wasn't enough — walking on the rooftop directly over
+either stair still felt like walking on air (no floor there, and grenades thrown up through
+that space sailed straight through into the room below, unblocked). Fixed properly this time,
+addressing the actual root constraint instead of routing around it:
+- `client.js` `surfaceHeightAt`: climb-state trigger moved from `st >= 0.7` to `st >= 0.6`.
+  Verified via exact math (danger zone starts at `(roofBottomY - PLAYER_HEIGHT) / toY` =
+  66.56% of the climb given this mansion's wall height) that 0.6 snaps a climbing player to
+  full height comfortably before the raw, ungraduated climb height would ever enter the
+  ceiling's clip range — the platform-priority height-snap (added batch 18) is atomic within
+  a single `surfaceHeightAt` call, so once the trigger fires, the returned height jumps
+  straight to the platform's full y in the same frame, never exposing an intermediate height
+  inside the danger band.
+- `gameData.js`: the roof's second slab now spans the FULL width (matching the main roof's
+  `w`), directly over both stairs' entire climb paths, real collidable geometry (not a
+  decor-only visual patch) — so grenades/bullets are now actually blocked by it, per the
+  explicit ask.
+
+**Verified before deploying, not just reasoned about:**
+- Wrote a standalone climb-simulation script (`sim_climb_generic.mjs`, reusing the exact
+  `surfaceHeightAt`/`collidesAt` logic from client.js) that walks a virtual player across each
+  ramp at real per-frame movement speed (`5.5/60` units/frame) and detects a stuck loop (>120
+  consecutive frames blocked at the same position without ever displacing).
+- Confirmed BOTH mansion stairs climb cleanly to full height (`y=6.31`) with **zero** blocked
+  frames under the new 0.6 trigger + full-width roof.
+- Re-ran the identical test with the OLD 0.7 trigger (same full-width roof) to confirm the
+  test methodology actually catches the bug it's meant to catch — it does: both stairs stall
+  permanently at ~66% height (`y≈4.2`), proving the fix is both necessary and sufficient, not
+  just theoretically safe.
+- Re-ran the same stall-detection test across all 5 regular ruined-house ramps (axis:'z',
+  unaffected by this mansion-specific ceiling) under both 0.6 and 0.7 — byte-identical
+  behavior in both cases (an unrelated pre-existing door-frame collision artifact from the
+  test's straight-line approach vector shows up identically either way, confirming it's not a
+  regression from the trigger change; houses have no ceiling over their stairs to begin with).
+- Confirmed the extended roof AABB (`x:0, z:111.5, w:26, d:5` → z-range `[109,114]`) fully
+  covers both stairs' ramps (`z-range [109,112]`) with margin, and is flush against the
+  platform's own south edge (`z=114`) — no seam.
+- Ran the standard spawn-point (14) and pickup-point (19) collision sweep against the full
+  updated wall list for both themes — zero blocked.
+- Syntax-checked all three files locally and on remote, city-theme layout still builds
+  (143 walls/7 ramps/7 platforms, unaffected — mansion is ruins-only).
+
+Deployed `gameData.js` + `client.js` together, pm2 restarted clean, curl-verified both changed
+lines live on the remote. Not browser-tested per standing instruction.
+
+## Batch 21 (2026-09-10): DONE — fixed the visible floating-slab bug batch 20 introduced
+
+User feedback (screenshot): the batch 20 full-width roof extension was rendering a flat gray
+slab hovering directly above the stairs' own sloped/stepped mesh — a visible double-floor
+artifact, not the intended "connect the roof to the stairs" look. Root cause: `roof` is a
+regularly-rendered wall entry (no `renderAs` tag), so extending it to be visible AND full-width
+put a flat ceiling plane right on top of the already-visible angled stair steps.
+
+Fix: split the single full-width slab back into three pieces —
+- The center strip between the stairs (x:[-4,4]) stays a real VISIBLE slab (this part was
+  always correct — nothing else occupies that space, so a visible fill was right there).
+- Each stair's own footprint gets a separate INVISIBLE (`renderAs:'invisible'`) collision box
+  instead, same z-span/margin as before (`d:5`, past both stairs' outer edges) — grenades and
+  bullets are still blocked over the stairs (per the earlier explicit ask), but nothing new is
+  drawn over the stair mesh, so the stairs read as just the stairs again.
+
+Reused the codebase's existing convention for this exact situation (already used for the
+rooftop `platform` and the ajar door's rotated-footprint approximation) rather than inventing
+a new pattern.
+
+Re-ran the full batch-20 verification suite against the split geometry before deploying: both
+mansion stairs still climb cleanly to full height with zero stuck frames (`sim_climb_generic.mjs`),
+spawn (14) and pickup (19) sweep clean on both themes, city theme still builds (145 walls now,
++2 vs the pre-mansion-stairs baseline — confirms the invisible stair-ceiling pieces apply
+identically to both themes, as expected since the mansion itself is shared, just recolored).
+Syntax-checked locally and on remote, pm2 restarted clean, grep-verified the new
+`stairCeilings` code is live on the remote.

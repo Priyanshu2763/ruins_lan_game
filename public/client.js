@@ -33,7 +33,14 @@ function surfaceHeightAt(x, z) {
     const s = ACTIVE_RAMPS[i];
     const hw = s.w / 2, hd = s.d / 2;
     if (Math.abs(x - s.x) <= hw && Math.abs(z - s.z) <= hd) {
-      const t = clamp01((z - (s.z - hd)) / s.d);
+      // axis:'x' ramps climb along X instead of Z (needed for a staircase running alongside
+      // an east-west wall, like the mansion's back — every ramp before this climbed along Z
+      // only, which is why this field existed but was never actually read until now).
+      const isX = s.axis === 'x';
+      const half = isX ? hw : hd;
+      const coord = isX ? x : z;
+      const center = isX ? s.x : s.z;
+      const t = clamp01((coord - (center - half)) / (half * 2));
       const st = s.reverse ? 1 - t : t;
       // A wide trigger band (last/first 30% of the climb, not the last 1.5%) — movement
       // advances in per-frame position steps, so a razor-thin threshold near the very top can
@@ -42,8 +49,33 @@ function surfaceHeightAt(x, z) {
       // nobody's movement ever lands inside a 0.015-wide window by chance. Triggering a bit
       // early just means the last stretch of the climb snaps to floorY a little sooner, which
       // reads fine — nowhere close to the old "can't enter at all".
-      if (st >= 0.7) standingPlatformIndex = i;
+      // 0.6, not 0.7: the mansion's stairs now have a real ceiling directly overhead (added
+      // so grenades can't fly through it, see gameData.js), and a climbing body's head starts
+      // clipping that ceiling's underside at ~66.6% of the climb (fromY+toY, PLAYER_HEIGHT
+      // math) — computed exactly, not guessed. The old 0.7 trigger fired AFTER that point,
+      // meaning there was a real ~3-4% stretch of the climb where raw (un-snapped) height was
+      // already too tall for the ceiling but state hadn't fired yet to rescue it via the
+      // platform-priority check below — a genuine stuck-in-place bug, not a stutter (you
+      // can't climb far enough in X to escape the ceiling without first reaching a height the
+      // ceiling won't allow). 0.6 snaps to full height before that zone is ever reached. Still
+      // plenty wide for the "can't get into the 1st floor" fix from before (per-frame movement
+      // steps landing inside this window reliably) — the house stairs, which have no ceiling
+      // to worry about, are unaffected by the earlier snap either way.
+      if (st >= 0.6) standingPlatformIndex = i;
       else if (st <= 0.3) standingPlatformIndex = -1;
+      // Once "on" this ramp's platform (state just set to i), prefer the platform's own flat
+      // height over the ramp's interpolated one if we're already within the platform's
+      // (deliberately overlapping) footprint too — otherwise a player who triggers at 70% and
+      // immediately turns toward the building stays at ~70% height for a while longer, and if
+      // there's a roof/ceiling overhead (the mansion has one, the houses don't — this never
+      // came up before), their body can be tall enough to clip its underside from below while
+      // still short of the platform itself. Snapping to full height the moment state sets
+      // sidesteps that entirely. Descending (st back under 0.3, state cleared) falls straight
+      // through to the normal interpolated value below, so the climb-down still looks right.
+      if (standingPlatformIndex === i) {
+        const p = ACTIVE_PLATFORMS[i];
+        if (p && Math.abs(x - p.x) <= p.w / 2 && Math.abs(z - p.z) <= p.d / 2) return p.y;
+      }
       return s.fromY + (s.toY - s.fromY) * st;
     }
   }
@@ -505,16 +537,20 @@ function buildRampSteps(ramps, color) {
   const steps = 12;
   const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
   for (const ramp of ramps) {
-    const hd = ramp.d / 2;
-    const stepDepth = ramp.d / steps;
+    const isX = ramp.axis === 'x';
+    const half = (isX ? ramp.w : ramp.d) / 2;
+    const stepDepth = (half * 2) / steps;
     for (let i = 0; i < steps; i++) {
       const t = (i + 1) / steps; // far edge of this step — matches surfaceHeightAt's value there
-      const zLocal = (i + 0.5) * stepDepth; // 0 at the ramp's low-z edge
-      const zPos = ramp.reverse ? ramp.z + hd - zLocal : ramp.z - hd + zLocal;
+      const local = (i + 0.5) * stepDepth; // 0 at the ramp's low edge
+      const pos = ramp.reverse ? (isX ? ramp.x : ramp.z) + half - local : (isX ? ramp.x : ramp.z) - half + local;
       const topY = ramp.fromY + (ramp.toY - ramp.fromY) * t;
       const h = Math.max(0.15, topY);
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(ramp.w * 0.92, h, stepDepth * 0.96), mat);
-      mesh.position.set(ramp.x, h / 2, zPos);
+      const geo = isX
+        ? new THREE.BoxGeometry(stepDepth * 0.96, h, ramp.d * 0.92)
+        : new THREE.BoxGeometry(ramp.w * 0.92, h, stepDepth * 0.96);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(isX ? pos : ramp.x, h / 2, isX ? ramp.z : pos);
       scene.add(mesh);
     }
   }
