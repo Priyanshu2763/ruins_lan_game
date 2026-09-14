@@ -919,3 +919,404 @@ spawn (14) and pickup (19) sweep clean on both themes, city theme still builds (
 identically to both themes, as expected since the mansion itself is shared, just recolored).
 Syntax-checked locally and on remote, pm2 restarted clean, grep-verified the new
 `stairCeilings` code is live on the remote.
+
+## Batch 22 (2026-09-11): DONE — simple username/password auth gate before the menu
+
+User asked for a small auth flow so reloading goes straight to the join/create tab (instead of
+no gate at all), with a simple username+password, stored in a local JSON file that's gitignored.
+
+**Server (`server/index.js`):** `express.json()` added; two new REST endpoints, `POST
+/api/register` and `POST /api/login`. Accounts live in `server/users.json` (loaded into memory
+on boot, rewritten on every register) — NOT bcrypt/a new dependency, uses Node's built-in
+`crypto.scryptSync` for salted password hashing (random 16-byte salt per user, 64-byte hash,
+both stored as hex) plus `crypto.timingSafeEqual` for the compare, so passwords are never
+stored or compared in plaintext despite using zero extra npm packages. Username: 3-20
+alphanumeric/underscore. Password: 4-128 chars — deliberately minimal validation, this is a
+LAN party game's login, not a banking app.
+
+**Client (`index.html` + `client.js`):** new `#authScreen` (same panel/screen styling as the
+existing menu) shown before `#menuScreen` — username + password fields, Log In / Create Account
+buttons, inline error text. On successful login/register, `{username}` is saved to
+`localStorage['ruins_auth']` and the join/create menu shows immediately; a "Signed in as X /
+Log Out" bar was added to the top of the menu panel. On every page load (including the
+"Quit to Menu" flow, which was already a full `location.reload()`), if `ruins_auth` is present
+the auth screen is skipped entirely and the join/create tab shows right away — this is the
+actual behavior the user asked for ("when we reload we go directly to the join/create tab").
+Logging out clears that key and drops back to the auth screen.
+
+**Explicitly NOT built:** server-side sessions/tokens — the browser's remembered username is
+trusted for repeat visits without re-checking the password every reload (same trust level the
+game already gave the freeform "your name" field before this). The real check happens once, at
+login/register time, against the actual stored hash — this isn't a security theater flow, it's
+just intentionally not adding session-token machinery for a feature this size. Flagged here in
+case a future "remember me should expire" or "add real sessions" ask comes in.
+
+**Verified before deploying:** registered a real test account and round-tripped all the
+expected cases directly against the live endpoints — duplicate username (409), correct login
+(200), wrong password (401), nonexistent username (401), invalid username shape (400), too-short
+password (400). Confirmed the stored record is actually salted+hashed, not plaintext. Confirmed
+`server/users.json` is excluded from git (`git status --short` shows nothing, `git check-ignore
+-v` confirms the `.gitignore` rule matches). Test account removed and the server restarted
+(in-memory `users` map is populated at boot, so just rewriting the file on disk isn't enough to
+clear a test account already loaded — needed a restart to actually drop it) before real players
+use it. Syntax-checked all three files locally and on remote, pm2 restarted clean.
+
+## Batch 23 (2026-09-11): DONE — mansion interior partition walls
+
+User feedback (screenshot from inside the mansion): the ground floor was one big empty hall,
+read as hollow/unfinished (this was intentional back at batch 15 — shell-only, "waiting on the
+user's follow-up interior spec" — this is that follow-up). User sketched a rough ASCII layout
+of offset/staggered partition walls, not a tidy room grid.
+
+Added 4 real wall segments (`gameData.js`, `makeMansion`'s new `interior` array, merged into
+the same `walls` list as everything else — full collision, blocks players/bullets/grenades,
+same as every other wall in the game, not decoration): a west N-S spine joined into an L with
+an east-running wall, then a second N-S spine further east, deliberately NOT aligned with the
+first L's open end (a real ~2.55-unit gap between them, matching the staggered/offset look in
+the user's sketch rather than a continuous connected wall), plus a short stub off that second
+spine's south end for one more nook.
+
+**Verified before deploying, not eyeballed:**
+- Computed every clearance by hand against the mansion's exact numbers (`hw=13, hd=11,
+  wallT=0.9, doorGapW=6, crackW=7.8`): none of the 4 new walls reach into the north door gap
+  (x:[-3,3]) or either crack gap (z:[94.1,101.9] at the east/west walls) — closest approach to
+  the door is 1.45 units clear, cracks aren't approached at all (interior walls top out at
+  x=8.5, cracks are at x=±12.55).
+  - Confirmed via an AABB overlap check (not just distance-by-eye) that none of the 4 walls
+  overlap any of the 4 corner towers — this was the one real near-miss during design (an
+  earlier draft's south-east stub extended into the SE tower's footprint; shortened it from
+  x:[7,10] to x:[7,8.5] to clear it, 1.1 units to spare).
+- Every spine's far end is left open (no dead-end pocket with zero exit) — smallest gap
+  anywhere is 1.1 units (stub's open end to the SE tower), everything else ≥2.5 units.
+- Ran the standard spawn/pickup collision sweep (33 points, both themes) — zero blocked.
+  City theme still builds (149 walls now, mansion is shared across both themes per batch
+  15/20, just recolored).
+
+Syntax-checked locally and on remote, pm2 restarted clean, grep-verified the new interior
+walls are live on the remote.
+
+## Batch 24 (2026-09-11): DONE — low diagonal cover wall with a gun hole, mansion interior
+
+User sent a reference photo (a blocky/staggered brick wall) plus a screenshot marking where in
+the mansion they wanted it, asking for: diagonal placement, short enough to fully hide a
+crouched player, and a gap in it to fire through ("gun hole").
+
+This engine has no rotated-hitbox support (same constraint as the ajar mansion door, batch 17)
+— a real 45°-rotated collision box isn't possible. Rather than approximate one rotated box
+(which would either over- or under-cover the actual diagonal shape), built a new reusable
+helper, `makeDiagonalCoverWall()` in `gameData.js`: a chain of small square blocks stepped
+along a line from point A to B, spaced closer than the block size so consecutive blocks
+overlap (no seam a bullet or player could slip through) — reads as a blocky diagonal barrier,
+which if anything matches the reference photo's own chunky brick-unit look better than a smooth
+rotated slab would have.
+
+**Height, derived from the actual crouch hitbox, not guessed:** server-side, a crouched
+player's hit-cylinder tops out at `CROUCH_HEAD_OFFSET (1.0) + 0.2 = 1.2` above their feet
+(`handleAttack`, server/index.js). Solid blocks in the chain are `1.3` tall — clears that with
+a real 0.1 margin, so crouching anywhere behind a solid segment fully hides you; standing
+(hit-cylinder top 1.7) stays exposed above it, a deliberate height tradeoff, not an oversight.
+
+**The gun hole is ONE block in the chain** (the user asked for "a gap," singular — not a slit
+running the wall's whole length), built as a low block (`0-0.75`) plus a separate cap
+(`1.10-1.30`) instead of one solid piece, leaving a real `0.75-1.10` opening roughly at crouch
+eye height (`CROUCH_EYE_HEIGHT = 1.15`) that a bullet/grenade ray actually passes through (it's
+a true AABB gap, not a texture trick) — you can see and fire out through it while crouched, and
+in turn can be hit through it too, the standard tradeoff for a firing slit.
+
+**Placement:** just south of the mansion's front door (`x1:-2,z1:92` to `x2:4,z2:89.5`),
+covering someone as they come through the entrance. Verified by exact-number clearance checks
+(not eyeballed) against every nearby structure before deploying: closest approach to the west
+interior spine is 1.85 units, to the east spine 1.85 units, to the north wall 1.35 units — all
+comfortably above the ~0.8-unit hard-block threshold from `PLAYER_RADIUS` padding, so nothing
+here traps a player or seals the doorway.
+
+Ran the standard spawn/pickup sweep (33 points, both themes) — zero blocked. City theme still
+builds (158 walls, mansion shared across both themes as before). Syntax-checked locally and on
+remote, pm2 restarted clean, grep-verified the deployed code matches.
+
+**Not done:** no real brick photo-texture was added — the new wall reuses the mansion's
+existing wall material/color like every other wall in the game. The reference photo was read
+as "this shape/scale of cover wall," not a request for a new textured asset; flagging in case
+that reading was wrong.
+
+## Batch 25 (2026-09-11): DONE — corner hideout redo (moved off the door), and a real grass-floating bug fixed
+
+**Corner hideout, take two.** User rejected batch 24's placement (it was next to the door, not
+a corner) and sent an ASCII sketch of a wall corner with a diagonal cut. Removed the door-side
+piece entirely and rebuilt it as an actual corner: two full-height "back" walls (`cornerBackA`,
+`cornerBackB` in `makeMansion`, gameData.js) forming a real L, with the diagonal
+cover-with-gun-hole (`makeDiagonalCoverWall`, unchanged from batch 24) hugging only the corner
+end, not stretched across the whole opening.
+
+Two earlier layouts for this both looked right from the math (positive-looking gaps at block
+centers) but FAILED when checked with a full grid scan (`collidesAt` sampled every 0.5 units
+across the whole area, not just a few spot points) — stretching the diagonal chain toward the
+second back wall left a gap that measured positive center-to-center but was still fully sealed
+once each block's own `PLAYER_RADIUS` padding (pushing its effective footprint to ~2.2 units
+wide against a 1-unit block spacing) was accounted for. This is the same class of mistake as
+the mansion's first ajar-door angle (batch 16/17) — a gap that's positive on paper but still a
+hard block in practice. Fixed by not trying to thread a gap at all: the diagonal only covers
+the corner's near third, and everything past it is genuinely untouched floor, verified this
+time by rendering the actual `collidesAt` grid as ASCII and confirming the pocket and its
+entrance are one contiguous open region, not eyeballing individual sample points.
+
+Re-ran the full checklist before deploying: spawn/pickup sweep (33 points, both themes) clean,
+city theme still builds, syntax-checked locally + remote, pm2 restarted clean, grep-verified.
+
+**Grass floating in the air — separate bug, unrelated to any recent change.** User reported
+Ruins-extension grass patches visibly floating above the ground with a gap underneath. Root
+cause found by actually inspecting `grass.png`'s alpha channel (Python/PIL, not guessing): the
+background-removal crop on this image wasn't tight — the visible blades only occupy rows
+34-270 of a 335px-tall image, leaving a real ~19% fully-transparent margin below them (and
+~10% above). `alphaTest` correctly discards that margin so it never draws, but
+`buildGrassPatches` (client.js) was positioning each grass plane's GEOMETRIC bottom edge at
+ground level — which put the actual VISIBLE blades (which start 19% of the plane's height above
+that) floating with a real, measured gap (~0.17-0.3 units depending on the clump's random scale
+factor) between them and the ground. Fixed by deriving the correct vertical offset directly
+from the measured pixel margin (`GRASS_BOTTOM_MARGIN_Y = (64/335) * planeHeight`) instead of
+the old hardcoded `0.46` magic number, so the visible blade bottoms now sit at y=0 regardless of
+each clump's random scale. Confirmed the fix value (0.2935) by independent calculation before
+touching the code. No image re-processing needed — this was a positioning bug, not a texture
+content bug, so alphaTest handles the (now correctly hidden below ground) transparent margin
+same as before.
+
+Syntax-checked, deployed, grep-verified live, pm2 restarted clean.
+
+## Batch 26 (2026-09-14): DONE — meme posters on walls, first one placed in the mansion corner hideout
+
+User wants meme images placed on specific walls as decorations, starting with `modi modi.png`
+(a photo, background-removal'd to trim its top/bottom black video letterbox bars first, in a
+separate step before this one) on the corner hideout's back wall (`cornerBackA`, batch 25) so
+whoever is hiding there sees it.
+
+Since the screenshot alone (no minimap/coordinates) couldn't pin down which of ~7 similar-
+looking mansion cover structures it was, asked the user directly (which structure, which
+theme) rather than guessing — confirmed: the mansion, City theme, corner hideout back walls.
+
+**New reusable capability, not a one-off hack:** `ACTIVE_DECOR` entries (client.js) already
+supported a plain-color box (crenellations, ajar door panel) or `rotY` for rotation. Extended
+the same loop so a decor entry with an `img` field renders as a flat photo-textured
+`PlaneGeometry` instead of a box — a real 3D crate doesn't make sense for a flat picture, and a
+plane avoids needing a material-per-face array just to keep the photo off the edges/back
+(reuses the existing `loadPhotoTexture` cache, same as drums/grass/ammo). Any future meme/
+poster just needs one new decor entry with `img`, `w`/`h` (sized to the image's own aspect
+ratio), position, and `rotY` to pick which way it faces — no new plumbing needed.
+
+**This poster specifically:** `meme_modi.png` (renamed from `modi modi.png` — the space in the
+original filename would need URL-encoding, not worth the risk) uploaded to
+`public/images/`. Placed flush against `cornerBackA`'s west face (`x = 3 - wallT/2 = 2.55`,
+offset out by 0.02 to avoid z-fighting with the wall's own surface), `rotY = -90°` so the
+plane's front face points west into the pocket — toward whoever is standing there hiding.
+Material is double-sided regardless, so a sign error in that rotation math wouldn't have hidden
+it, but got it right anyway. Sized 2.07×2.0 to match the image's own ~1.03:1 aspect ratio
+(no stretching).
+
+Verified before deploying: `getMapLayout` for both themes actually contains the new decor
+entry with the expected numbers, syntax-checked both files, confirmed the image is reachable
+(`curl` 200) after deploy, grep-verified the code is live. Not browser-tested per standing
+instruction — worth a look in-game to confirm the framing/size reads well from inside the
+pocket, first real use of this new poster system.
+
+## Batch 27 (2026-09-14): DONE — red banners + climbing ivy on the mansion's front facade
+
+User felt the entrance was too plain/flat (screenshot of the front, big blank wall either side
+of the door) and explicitly asked for real reference rather than a "child paint app" result —
+searched the web for castle banner and ivy-on-stone-wall photos first (see below) to get
+proportions/detail right before writing any code, rather than guessing at what a banner or ivy
+looks like.
+
+**No usable royalty-free source image existed for either** (stock sites are paywalled, and
+there's no clean transparent-background banner/ivy PNG to just drop in), so both are hand-drawn
+canvas textures — same established technique as `buildWallTexture`/`buildMudTexture`, just
+informed by what the reference search actually showed instead of guessing:
+
+- `buildBannerTexture()` (client.js): alternating vertical red fold-shading bands (real cloth
+  isn't flat-lit), a gold trim border, a gold rod-pocket bar at the top, a small gold emblem,
+  and — the detail that actually makes it read as "banner" instead of "red rectangle" — the
+  cloth is cut to taper to a single point at the bottom (`globalCompositeOperation:
+  'destination-out'`) instead of a hard rectangular edge, matching real heraldic banner shape
+  from the reference photos.
+- `buildIvyTexture()`: a meandering vine stem climbing from the base with leaf clusters
+  branching off it, deliberately denser near the bottom and thinning toward the top (real ivy
+  on a wall is thick low growth tapering into sparse new shoots higting, not a uniform carpet)
+  — alpha-tested transparent background, same crossed-plane-style technique as the existing
+  grass texture.
+
+**New decor type system, not a one-off:** extended the same `ACTIVE_DECOR` loop from batch 26
+(which already handled plain boxes and `img` photo posters) with two more branches,
+`type:'banner'` and `type:'ivy'` — each builds its shared texture/material ONCE (cached in a
+local var, not per-instance) since all banners share one texture and all ivy patches share
+another, then every decor entry of that type just supplies position/size/rotation. Any future
+banner or ivy patch anywhere in the game is now a one-line data addition, no new rendering code.
+
+**Placement (`makeMansion`, gameData.js):** two banners flanking the front door (`x:±4.2`,
+outside the door gap `x:[-3,3]` with 0.48 units to spare), four ivy patches spread further out
+on the same wall face (`x:±6.5,±10`), all on the wall's outer/north face
+(`outerFaceZ = z - hd - wallT/2 - 0.02`, just in front of the wall to avoid z-fighting), facing
+north (`rotY:180°`) so an approaching player sees them head-on. Purely decorative — same
+`decor` list as the crenellations/door panels, no collision, doesn't touch `walls`.
+
+Verified before deploying: computed every x-range against the door gap and both corner towers
+(closest approach 0.48 units, nothing overlaps), ran the standard spawn/pickup sweep (33
+points, both themes) — zero blocked, decor count sane (58 entries each theme, mansion is
+shared). Syntax-checked locally and on remote, pm2 restarted clean, grep-verified the deployed
+code matches. Not browser-tested per standing instruction — worth a look in-game, this is
+hand-tuned canvas art and reading right on-screen (banner point/fold visibility, ivy
+density/color) is exactly the kind of thing that benefits from an actual look.
+
+Sources consulted for reference (proportions/shape/color, not downloaded assets):
+- https://www.darkknightarmoury.com/product/medieval-castle-banner/
+- https://www.shutterstock.com/search/castle-flag
+- https://www.gettyimages.com/photos/stone-wall-with-ivy
+- https://www.dreamstime.com/photos-images/stone-wall-texture-vines.html
+
+## Batch 28 (2026-09-14): DONE — melody.png poster on the center house's front wall
+
+User marked a red rectangle on a screenshot showing exactly where, on the center of the 5
+ruined houses, they wanted `melody.png` placed — above the doorway on the front (north) wall.
+
+Identified the center house from `RUIN_HOUSES` (gameData.js): `{x:0, z:58, hasRoof:true}` —
+the one house with a full roof, matching "center house" unambiguously (the other 4 are
+identical shells, this is the only visually distinct one, and it's literally in array position
+[2] of 5, i.e. the middle). Confirmed via `makeRuinHouse`'s own logic that the marked spot is a
+real solid wall face, not a gap: the GROUND floor's north wall has the door gap, but the UPPER
+floor's `wallRoom` call only carves gaps on `stairSide`/`crackSide` — north is never gapped on
+the upper floor — so the area directly above the door is solid flat wall the full width,
+exactly where the red rectangle sits in the screenshot.
+
+**Made this a reusable per-house field, not a one-off.** Added an optional `poster: {img, w, h}`
+field to `makeRuinHouse()` (and to the center house's entry in `RUIN_HOUSES`) — if present, a
+decor entry is added flush against the upper wall's outer north face
+(`z = z - hd - wallT/2 - 0.02`), vertically centered on that wall
+(`y = floorY + upperWallH/2`), facing north (`rotY:180°`) toward an approaching player, reusing
+the `img`-poster decor type from batch 26. Any of the other 4 houses can get their own poster
+later with one line in `RUIN_HOUSES`, no new code.
+
+Sized to the image's real aspect ratio (204×192, ~1.06:1) — `w:2.44, h:2.3` — checked this sits
+comfortably inside the upper wall's own bounds (`y:[3.15,5.45]` vs the wall's `[3,5.6]`) and
+well inside the house's own width (`x:[-1.22,1.22]` vs the house's 5-unit half-width), so
+nothing spills off the wall or over an edge.
+
+Verified before deploying: spawn/pickup sweep (33 points, both themes) clean, decor count sane
+(59 now, +1 from batch 27's 58), syntax-checked locally and on remote, pm2 restarted clean,
+confirmed the uploaded image is reachable (curl 200). Not browser-tested per standing
+instruction — worth a look to confirm the framing matches the marked screenshot.
+
+## Batch 29 (2026-09-14): DONE — fixed the meme posters looking too light/faded
+
+User reported both deployed posters (`meme_modi.png` on the mansion corner hideout, batch 26;
+`melody.png` on the center house, batch 28) looked washed out/faded.
+
+Root cause: the `img`-poster branch of the decor render loop (client.js) used
+`MeshStandardMaterial` — the same lit-PBR material every other object in the scene uses — but
+the scene's directional sun light is strong (intensity up to 2.0), which pushes a
+fully-lit-white-base material well past the source image's actual brightness. Both memes
+deployed so far also happen to have large light/white background areas, which bright PBR
+lighting blows out further, reading as "faded."
+
+Fixed by switching posters to `MeshBasicMaterial` — unlit, ignores scene lighting entirely,
+renders the texture's real pixel colors regardless of sun angle/intensity. This is the correct
+fix for what a wall poster actually is (a flat printed image, not a glossy lit 3D surface), not
+a guessed color-tint layered on top of the real problem. Every other textured object
+(walls/drums/ammo/grenade/banners/ivy) is untouched — this only affects the `img`-poster
+branch, matching the scope of the complaint (2 specific objects, not "everything looks
+wrong").
+
+Syntax-checked, deployed, grep-verified the change is live, pm2 restarted clean. Not
+browser-tested per standing instruction — worth a look to confirm both posters read at full
+intended brightness now.
+
+## Batch 30 (2026-09-14): DONE — meme posters on the remaining 4 houses
+
+Filled out the last 4 of the 5 ruined houses using the per-house `poster` field added in
+batch 28 — no new code needed, just data:
+- `x:-32` → `monalisa.png`
+- `x:-16` → `bsdk.png`
+- `x:16` → `baigan.png`
+- `x:32` → `bulla.png`
+
+Each sized to its own image's real aspect ratio (checked via PIL, not guessed) so nothing
+stretches: monalisa 2.44×2.3 (1.06:1), bsdk 3.03×2.0 (1.51:1), baigan 2.89×2.2 (1.31:1), bulla
+3.28×1.8 (1.82:1) — same `w:h` convention as melody.png. All 5 houses now have a poster
+centered on their upper wall, directly above the door (the only fully solid, gap-free wall
+face on any of them).
+
+Verified before deploying: computed every poster's x/y bounds against its own house's 5-unit
+half-width and the upper wall's `y:[3,5.6]` range — all comfortably inside on every house, no
+spillover past an edge or wall boundary. Ran the standard spawn/pickup sweep (33 points, both
+themes) — zero blocked. Decor count sane (63, +4 from batch 29's 59). Syntax-checked locally
+and on remote, pm2 restarted clean, confirmed all 4 uploaded images reachable (curl 200 each).
+These automatically render with the unlit `MeshBasicMaterial` fix from batch 29, so no
+faded/washed-out repeat of that issue. Not browser-tested per standing instruction.
+
+## Batch 31 (2026-09-14): DONE — jaldi_hato.png poster in the mansion's stairs corridor
+
+User's screenshot (looking through the gap between the two back stairs, up at the roof
+extension) marked the flat south-wall surface there for a big centered poster
+(`jaldi waha se hato.png`, renamed `jaldi_hato.png` on deploy — spaces in filenames aren't
+worth the URL-encoding risk).
+
+This is the SAME "center strip" area from batch 20/21 (`x:[-4,4]`, the gap between the west and
+east stairs, under the visible roof extension) — but the mirror image of every poster placed so
+far: those were all on north-facing walls (mansion front door, houses), so they needed
+`rotY:180°` to face the approaching player. This is the mansion's SOUTH wall, whose exterior
+face is on the `+z` side instead of `-z` — no rotation needed at all, `PlaneGeometry`'s default
++Z-facing normal already points toward someone standing in the stairs corridor looking north at
+the wall. Worth noting since it would have been an easy copy-paste mistake to reuse
+`rotY:Math.PI` out of habit and end up with the image facing backward into the wall.
+
+Sized large relative to the ~8-unit-wide opening per "full size": `w:3.375, h:4.5` (image's own
+0.75:1 aspect ratio, checked via PIL), centered at `x:0, y:3` — dead center of both the gap's
+width and the wall's own height.
+
+Verified before deploying: x-range `[-1.69,1.69]` sits well inside the `[-4,4]` gap, y-range
+`[0.75,5.25]` sits well inside the wall's `[0,6]` height, standard spawn/pickup sweep (33
+points, both themes) clean, decor count sane (64, +1 from batch 30's 63). Syntax-checked
+locally and on remote, pm2 restarted clean, confirmed the uploaded image reachable (curl 200).
+Renders with the unlit `MeshBasicMaterial` fix from batch 29 automatically, same as every other
+poster. Not browser-tested per standing instruction.
+
+## Batch 32 (2026-09-14): DONE — stance indicator above the health bar
+
+Added a `#stanceLabel` line ("STANDING" / "CROUCHED" / "PRONE") between the "HEALTH" label and
+the health bar itself, per the explicit "just above the health bar" placement.
+
+Wired to the single existing `setStance(crouch, prone)` function (client.js) rather than
+duplicating logic at each call site — grepped for every place `isCrouched`/`isProne` get
+assigned and confirmed all three (C key toggle, Z key toggle, the stance reset on joining a
+room) already funnel through `setStance`, so one line there keeps the label correct everywhere
+with no separate update calls needed anywhere else.
+
+Syntax-checked, deployed, grep-verified both the HTML and JS changes are live, pm2 restarted
+clean. Not browser-tested per standing instruction — worth a quick look to confirm the label
+placement/styling reads well against the health bar.
+
+## Batch 33 (2026-09-14): DONE — last 6 meme posters, spread across the original core arena
+
+User's last 6 unused images (`aap kon`, `abe saale`, `depression`, `e lo angur khao`, `hum pe
+to h hi 9`, `jaldi bol`) go on `OBSTACLES_BASE` — the original arena that existed before the
+southward doubling/extension (houses/mansion), not the new area.
+
+New `ARENA_POSTERS` constant (gameData.js), merged into `getMapLayout`'s `decor` — spread
+across 6 different structures rather than clustered: 4 different perimeter-wall segments (one
+per cardinal side, each mounted on that wall's inward/arena-facing face) plus the 2 diagonally-
+opposite corner tower stumps (NW and SE, each on the face pointing toward the central plaza).
+Reuses the same `img`-poster decor convention as every prior poster — sized to each image's own
+aspect ratio (checked via PIL), offset 0.02 off its wall's face to avoid z-fighting, `rotY`
+picked per the wall's own facing direction (0/π/±π/2 for the 4 cardinal orientations, same
+convention as the mansion's banners/ivy).
+
+`depression.png` was already trimmed of its bottom black bar earlier in this conversation
+(before any wall placement work started) — used as-is here, no further edits needed.
+
+Verified before deploying: computed every poster's x/y bounds against its own wall's height
+range — all sit with visible margin on both sides, nothing spills past a wall's own extent.
+Standard spawn/pickup sweep (33 points, both themes) clean, decor count consistent (70 each
+theme, +6 from batch 32's 64). Syntax-checked locally and on remote, pm2 restarted clean,
+confirmed all 6 uploaded images reachable (curl 200 each). Renders with the unlit
+`MeshBasicMaterial` fix from batch 29 automatically. Not browser-tested per standing
+instruction.
+
+**This finishes the meme-poster project** — all 12 of the user's images are now placed
+somewhere in the game: 5 on the ruined houses (batch 28/30), 2 in the mansion (batch 26/31),
+and these last 6 across the original core arena.

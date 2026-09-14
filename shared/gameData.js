@@ -167,7 +167,7 @@ function baseRubble({ x, z, size, color }) {
 // neighbors' stairs never reach toward each other). `crackSide` is the second punched-through
 // wall (south/east/west, never north — north is always the door — and never equal to
 // stairSide, so the stair's own wall stays solid and structural).
-function makeRuinHouse({ x, z, size = 10, wallH = 3.0, upperWallH = 2.6, wallT = 0.7, crackSide = 'south', stairSide = 'east', hasRoof = false, color }) {
+function makeRuinHouse({ x, z, size = 10, wallH = 3.0, upperWallH = 2.6, wallT = 0.7, crackSide = 'south', stairSide = 'east', hasRoof = false, color, poster }) {
   const w = size, d = size, hw = w / 2, hd = d / 2;
   const floorY = wallH; // upper floor rests directly on top of the ground floor's walls — no seam
 
@@ -270,6 +270,18 @@ function makeRuinHouse({ x, z, size = 10, wallH = 3.0, upperWallH = 2.6, wallT =
   };
 
   const decor = baseRubble({ x, z, size, color });
+  // Optional poster on the upper floor's north (front) wall — unlike the ground floor, the
+  // upper wall has NO gaps.north (only stairSide/crackSide get gaps up there, see upperWalls
+  // above), so it's solid flat wall the full width, right above the doorway — exactly where
+  // the user marked it on a screenshot. Flush against the outer face, offset out 0.02 to avoid
+  // z-fighting with the wall's own surface, facing north (rotY 180°) toward an approaching
+  // player, same convention as the mansion's banners/ivy.
+  if (poster) {
+    decor.push({
+      x, y: floorY + upperWallH / 2, z: z - hd - wallT / 2 - 0.02,
+      w: poster.w, h: poster.h, rotY: Math.PI, img: poster.img,
+    });
+  }
   return { walls: [...groundWalls, ...upperWalls, ...roof, stairSideWall, stairBackWall, stairInnerWall], platform, ramp, decor };
 }
 
@@ -283,11 +295,11 @@ function makeRuinHouse({ x, z, size = 10, wallH = 3.0, upperWallH = 2.6, wallT =
 // (extends ~2.75 units past its own east wall) never reaches the 3.25-unit-clearer west wall
 // of the house 16 units over, and the rightmost house's stair still lands inside MAP_BOUNDS.
 const RUIN_HOUSES = [
-  { x: -32, z: 58, crackSide: 'south' },
-  { x: -16, z: 58, crackSide: 'west' },
-  { x: 0,   z: 58, crackSide: 'south', hasRoof: true }, // the one fully-covered house
-  { x: 16,  z: 58, crackSide: 'west' },
-  { x: 32,  z: 58, crackSide: 'south' },
+  { x: -32, z: 58, crackSide: 'south', poster: { img: 'monalisa.png', w: 2.44, h: 2.3 } },
+  { x: -16, z: 58, crackSide: 'west', poster: { img: 'bsdk.png', w: 3.03, h: 2.0 } },
+  { x: 0,   z: 58, crackSide: 'south', hasRoof: true, poster: { img: 'melody.png', w: 2.44, h: 2.3 } }, // the one fully-covered house
+  { x: 16,  z: 58, crackSide: 'west', poster: { img: 'baigan.png', w: 2.89, h: 2.2 } },
+  { x: 32,  z: 58, crackSide: 'south', poster: { img: 'bulla.png', w: 3.28, h: 1.8 } },
 ];
 
 // --- The mansion: a big haveli/castle-style centerpiece for the empty field south of the
@@ -339,6 +351,39 @@ function makeMansionStair({ climbLow, climbHigh, outerZ, stairWidth, toY, color 
   return { ramp, walls: [outerWall, backWall] };
 }
 
+// A short diagonal cover wall — this engine only supports axis-aligned collision boxes (no
+// rotated hitboxes, see the mansion's ajar door for the same constraint), so a true 45°-rotated
+// wall isn't possible. Instead this builds a chain of small square blocks stepped along the
+// requested line, close enough together that consecutive blocks overlap (no seams a bullet or
+// a player could slip through) — reads as a blocky diagonal barrier, which actually matches a
+// brick-built wall's own chunky material better than a single smooth rotated slab would.
+// `coverH` is deliberately short — tall enough that a CROUCHED player's hit-cylinder
+// (CROUCH_HEAD_OFFSET + the 0.2 hitbox margin server-side, see handleAttack) is fully behind
+// it, but well under a standing player's, so standing behind it still exposes you (a real
+// height tradeoff, not just a prop). One block along the chain (`gunHoleIndex`) is built as a
+// low block plus a separate cap instead of one solid block, leaving a real horizontal gap
+// between them at roughly crouch eye height — an actual hole a crouched player can fire and
+// see through, not just a shorter section of wall.
+function makeDiagonalCoverWall({ x1, z1, x2, z2, blockSize = 1.4, spacing = 1.0, coverH = 1.3, gunHoleIndex, color }) {
+  const dx = x2 - x1, dz = z2 - z1;
+  const len = Math.hypot(dx, dz);
+  const steps = Math.max(2, Math.round(len / spacing) + 1);
+  const holeIdx = gunHoleIndex != null ? gunHoleIndex : Math.floor(steps / 2);
+  const segments = [];
+  for (let i = 0; i < steps; i++) {
+    const t = i / (steps - 1);
+    const cx = x1 + dx * t, cz = z1 + dz * t;
+    if (i === holeIdx) {
+      const lowH = 0.75, gapH = 0.35, capH = coverH - lowH - gapH;
+      segments.push({ x: cx, y: lowH / 2, z: cz, w: blockSize, h: lowH, d: blockSize, color });
+      segments.push({ x: cx, y: coverH - capH / 2, z: cz, w: blockSize, h: capH, d: blockSize, color });
+    } else {
+      segments.push({ x: cx, y: coverH / 2, z: cz, w: blockSize, h: coverH, d: blockSize, color });
+    }
+  }
+  return segments;
+}
+
 function makeMansion({ x, z, w = 26, d = 22, wallH = 6.0, wallT = 0.9, color, doorColor }) {
   const hw = w / 2, hd = d / 2;
   const doorGapW = 6, crackW = w * 0.3;
@@ -381,12 +426,46 @@ function makeMansion({ x, z, w = 26, d = 22, wallH = 6.0, wallT = 0.9, color, do
   // already tall enough to clear it via the same "wall only blocks below its own height" seam
   // used everywhere else in this project, no literal opening required. A player who hasn't
   // climbed yet and tries to just walk into this wall is correctly, solidly blocked.
+  // Interior partitions — the ground floor was one big empty hall (deliberately left that way
+  // when the shell went in, waiting on a follow-up spec). These are real walls, same as every
+  // other wall in the game (full collision — block players/bullets/grenades, not decoration),
+  // laid out as a few offset spines per the user's own sketch rather than a tidy room grid: two
+  // spines joined into an L on the west side, a third spine staggered off to the east (not
+  // aligned with the L's open end — a real gap between them, not a doorway), plus a short stub
+  // for one more nook. Every spine's far end is left open rather than touching another wall,
+  // so nothing here can trap a player, and none of them reach into the door gap (x:[-3,3] at
+  // the north wall), either crack gap (z:[94.1,101.9] at the east/west walls), or a corner
+  // tower's footprint — checked against the exact numbers, not eyeballed.
+  const interior = [
+    { x: -5, y: wallH / 2, z: 97, w: wallT, h: wallH, d: 12, color }, // west spine (N-S)
+    { x: -0.5, y: wallH / 2, z: 103, w: 9, h: wallH, d: wallT, color }, // joins its south end, runs east
+    { x: 7, y: wallH / 2, z: 99.5, w: wallT, h: wallH, d: 13, color }, // staggered east spine (N-S)
+    { x: 7.75, y: wallH / 2, z: 106, w: 1.5, h: wallH, d: wallT, color }, // short stub off its south end
+  ];
+
+  // Corner hideout, not a lone wall in the open — two full-height "back" walls forming a real
+  // L, closing off a pocket, with the low diagonal cover-with-gun-hole (see
+  // makeDiagonalCoverWall) hugging ONLY the corner end (backA's near end), not stretched across
+  // the whole opening. Two earlier layouts both looked fine by eye but failed a real
+  // grid-scanned walk test (sampling collidesAt across the whole area, not just a few points):
+  // stretching the diagonal to reach toward backB left a gap that measured positive at the
+  // block centers but was still sealed once PLAYER_RADIUS padding was added on both sides — a
+  // ~2.2-unit-wide padded footprint per block doesn't leave room for a person between two
+  // block positions spaced only 1 unit apart. Fix: don't try to thread a gap AT ALL — the
+  // diagonal only spans the top third of the opening (near backA), and everything south/west
+  // of it is genuinely untouched floor, not a narrow gap between two placed things. Verified
+  // this time with a full grid scan of the region (every 0.5 units, not sample points): the
+  // interior pocket (~4x2.5, plenty for one player) and its entrance are contiguous and clear.
+  const cornerBackA = { x: 3, y: wallH / 2, z: 96, w: wallT, h: wallH, d: 6, color }; // N-S, z:[93,99]
+  const cornerBackB = { x: 0.5, y: wallH / 2, z: 99, w: 5, h: wallH, d: wallT, color }; // E-W, x:[-2,3], joins backA at (3,99)
+  const cornerCover = makeDiagonalCoverWall({ x1: 2.5, z1: 93.3, x2: 1.3, z2: 94.7, gunHoleIndex: 1, color });
+
   const walls = [
     ...wallSide({ side: 'north', x, z, w, d, wallT, y: wallH / 2, height: wallH, color, gapLen: doorGapW }),
     ...wallSide({ side: 'south', x, z, w, d, wallT, y: wallH / 2, height: wallH, color }),
     ...wallSide({ side: 'east', x, z, w, d, wallT, y: wallH / 2, height: wallH, color, gapLen: crackW }),
     ...wallSide({ side: 'west', x, z, w, d, wallT, y: wallH / 2, height: wallH, color, gapLen: crackW }),
-    ...westStair.walls, ...eastStair.walls,
+    ...westStair.walls, ...eastStair.walls, ...interior, cornerBackA, cornerBackB, ...cornerCover,
   ];
 
   const towerSize = 3.4, towerH = wallH + 2.6;
@@ -466,9 +545,42 @@ function makeMansion({ x, z, w = 26, d = 22, wallH = 6.0, wallT = 0.9, color, do
   const ajarCollisionD = panelW * Math.abs(Math.sin(ajarRotY)) + panelD * Math.abs(Math.cos(ajarRotY));
   const ajarCollision = { x: ajarX, y: doorY, z: ajarZ, w: ajarCollisionW, h: panelH, d: ajarCollisionD, color: doorColor, renderAs: 'invisible' };
 
+  // Meme poster on the corner hideout's back wall (cornerBackA), facing into the pocket — flush
+  // against its west face (x = 3 - wallT/2 = 2.55), offset out by 0.02 to avoid z-fighting with
+  // the wall's own surface. rotY = -90° points the plane's front face west, toward whoever is
+  // standing in the pocket looking east at it (material is double-sided anyway, so this is
+  // belt-and-suspenders, not load-bearing). Sized to the image's own ~1.03:1 aspect ratio.
+  const memePoster = { x: 2.53, y: 2.0, z: 96, w: 2.07, h: 2.0, rotY: -Math.PI / 2, img: 'meme_modi.png' };
+
+  // Red banners flanking the front door, plus climbing ivy further out on the same wall face —
+  // the entrance read as too plain/flat (a big blank crack-textured wall either side of the
+  // door). Both hang on the wall's OUTER (north) face, just in front of it (outerFaceZ - 0.02,
+  // avoids z-fighting), facing north (rotY = 180°) so an approaching player sees them head-on.
+  // Positioned outside the door gap (x:[-3,3]) and well clear of both corner towers (x:±11.3).
+  const outerFaceZ = z - hd - wallT / 2 - 0.02;
+  const banners = [-4.2, 4.2].map((bx) => ({
+    x: bx, y: 3.6, z: outerFaceZ, w: 1.45, h: 3.2, rotY: Math.PI, type: 'banner',
+  }));
+  const ivy = [
+    { x: -10, h: 4.5 }, { x: -6.5, h: 3.8 }, { x: 6.5, h: 4.2 }, { x: 10, h: 4.0 },
+  ].map((v) => ({
+    x: v.x, y: v.h / 2, z: outerFaceZ, w: v.h * 0.25, h: v.h, rotY: Math.PI, type: 'ivy',
+  }));
+
+  // Big centered poster on the south wall's OUTER face, in the open corridor between the two
+  // back stairs (x:[-4,4], the same "center strip" the visible roof extension covers — see
+  // batch 20/21) — dead center of that gap (x=0), sized large relative to the ~8-unit-wide
+  // opening. This is the SOUTH wall, so it's the mirror image of the door banners/ivy above:
+  // the exterior face is the +z side here (`z + hd + wallT/2`, not `z - hd - wallT/2`), and the
+  // plane needs NO rotation (rotY 0, PlaneGeometry's default +Z-facing normal already points
+  // toward someone standing in the stairs corridor looking north at the wall).
+  const stairsGapPoster = {
+    x: 0, y: 3, z: z + hd + wallT / 2 + 0.02, w: 3.375, h: 4.5, img: 'jaldi_hato.png',
+  };
+
   return {
     walls: [...walls, ...towers, shutDoor, ajarCollision, ...stairCeilings],
-    decor: [...buildCrenellations({ x, z, w, d, wallH, color }), ajarVisual],
+    decor: [...buildCrenellations({ x, z, w, d, wallH, color }), ajarVisual, memePoster, ...banners, ...ivy, stairsGapPoster],
     roof,
     platform,
     ramps: [westStair.ramp, eastStair.ramp],
@@ -537,7 +649,7 @@ export function getMapLayout(mapKey) {
     // rooftop) so that correspondence holds for every ramp, houses' and mansion's alike.
     platforms: [...houses.map((h) => h.platform), mansion.platform, mansion.platform],
     ramps: [...houses.map((h) => h.ramp), ...mansion.ramps],
-    decor: [...houses.flatMap((h) => h.decor), ...mansion.decor],
+    decor: [...houses.flatMap((h) => h.decor), ...mansion.decor, ...ARENA_POSTERS],
     grass: EXTENSION_GRASS,
   };
 }
@@ -589,4 +701,29 @@ const OBSTACLES_BASE = [
   // --- extra mid-lane cover to break long sightlines ---
   { x: 0, y: 0.825, z: -12, w: 3, h: 1.65, d: 1.5, color: 0x746753 },
   { x: 0, y: 0.825, z: 12,  w: 3, h: 1.65, d: 1.5, color: 0x746753 },
+];
+
+// Meme posters scattered across the ORIGINAL core arena's walls (OBSTACLES_BASE above) — the
+// part of the map that existed before the southward doubling/extension. Spread across 6
+// different structures (4 different perimeter-wall segments, 2 opposite corner tower stumps)
+// rather than clustered, each mounted flush against that structure's INWARD (arena-facing)
+// face — offset out 0.02 to avoid z-fighting — so it's visible to a player actually standing
+// in the arena, not the unreachable outside of the perimeter wall. `rotY` is picked from each
+// wall's own facing direction, same convention as the mansion's banners/ivy (0 = faces +Z,
+// π = faces -Z, π/2 = faces +X, -π/2 = faces -X). Each sized to its own image's real aspect
+// ratio (checked via PIL, not guessed) and kept within that wall's own height range with a
+// visible margin on both sides.
+const ARENA_POSTERS = [
+  // west perimeter wall, north segment (x:-33,z:-14,h:3) — faces east into the arena
+  { x: -31.98, y: 1.5, z: -14, w: 2.79, h: 2.2, rotY: Math.PI / 2, img: 'aap_kon.png' },
+  // east perimeter wall, south segment (x:33,z:14,h:3) — faces west into the arena
+  { x: 31.98, y: 1.5, z: 14, w: 3.31, h: 2.0, rotY: -Math.PI / 2, img: 'abe_saale.png' },
+  // north perimeter wall, west segment (x:-14,z:-33,h:2.8) — faces south into the arena
+  { x: -14, y: 1.4, z: -31.98, w: 1.57, h: 2.4, rotY: 0, img: 'depression.png' },
+  // south perimeter wall, east segment (x:14,z:33,h:2.8) — faces north into the arena
+  { x: 14, y: 1.4, z: 31.98, w: 2.91, h: 2.2, rotY: Math.PI, img: 'e_lo_angur_khao.png' },
+  // NW corner tower stump (x:-28,z:-28,h:2.5), east face — faces the central plaza
+  { x: -25.98, y: 1.25, z: -28, w: 1.97, h: 2.0, rotY: Math.PI / 2, img: 'hum_pe_to_h_hi_9.png' },
+  // SE corner tower stump (x:28,z:28,h:2.5), west face — faces the central plaza
+  { x: 25.98, y: 1.25, z: 28, w: 3.21, h: 1.8, rotY: -Math.PI / 2, img: 'jaldi_bol.png' },
 ];

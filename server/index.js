@@ -3,6 +3,8 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 import os from 'os';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   WEAPONS, MAX_HEALTH, RESPAWN_MS, MAX_PLAYERS_PER_ROOM, SPAWN_POINTS, SPAWN_SAFE_DIST,
@@ -17,9 +19,67 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 
 const app = express();
+app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/vendor/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build')));
 app.use('/shared', express.static(path.join(__dirname, '..', 'shared')));
+
+// ---------- Auth: simple username/password accounts, stored in a local JSON file ----------
+// Not meant to be bulletproof (this is a LAN party game, not a bank) but real per-account
+// passwords ARE checked, salted+hashed with scrypt (Node's built-in crypto, no extra
+// dependency needed) rather than stored in plaintext. users.json is gitignored — it's local
+// account data, not something that belongs in the repo.
+const USERS_FILE = path.join(__dirname, 'users.json');
+let users = {};
+try {
+  users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+} catch {
+  users = {};
+}
+function saveUsers() {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+function isValidUsername(u) {
+  return typeof u === 'string' && /^[a-zA-Z0-9_]{3,20}$/.test(u);
+}
+function isValidPassword(p) {
+  return typeof p === 'string' && p.length >= 4 && p.length <= 128;
+}
+
+app.post('/api/register', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!isValidUsername(username) || !isValidPassword(password)) {
+    return res.status(400).json({ ok: false, error: 'Invalid username or password.' });
+  }
+  if (users[username]) {
+    return res.status(409).json({ ok: false, error: 'That username is already taken.' });
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  users[username] = { salt, hash: hashPassword(password, salt) };
+  saveUsers();
+  res.json({ ok: true });
+});
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!isValidUsername(username) || !isValidPassword(password)) {
+    return res.status(400).json({ ok: false, error: 'Invalid username or password.' });
+  }
+  const user = users[username];
+  if (!user) {
+    return res.status(401).json({ ok: false, error: 'No account with that username.' });
+  }
+  const hash = hashPassword(password, user.salt);
+  const a = Buffer.from(hash, 'hex');
+  const b = Buffer.from(user.hash, 'hex');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ ok: false, error: 'Wrong password.' });
+  }
+  res.json({ ok: true });
+});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });

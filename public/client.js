@@ -88,6 +88,14 @@ function surfaceHeightAt(x, z) {
 }
 
 // ---------- DOM ----------
+const authScreen = document.getElementById('authScreen');
+const authUserInput = document.getElementById('authUserInput');
+const authPassInput = document.getElementById('authPassInput');
+const authError = document.getElementById('authError');
+const authLoginBtn = document.getElementById('authLoginBtn');
+const authRegisterBtn = document.getElementById('authRegisterBtn');
+const accountLabel = document.getElementById('accountLabel');
+const logoutBtn = document.getElementById('logoutBtn');
 const menuScreen = document.getElementById('menuScreen');
 const nameInput = document.getElementById('nameInput');
 const roomNameInput = document.getElementById('roomNameInput');
@@ -102,6 +110,7 @@ const gameContainer = document.getElementById('gameContainer');
 const hud = document.getElementById('hud');
 const lockHint = document.getElementById('lockHint');
 const healthFill = document.getElementById('healthFill');
+const stanceLabel = document.getElementById('stanceLabel');
 const killFeed = document.getElementById('killFeed');
 const centerMsg = document.getElementById('centerMsg');
 const roomTag = document.getElementById('roomTag');
@@ -132,6 +141,76 @@ closeControlsBtn.addEventListener('click', () => {
   controlsModal.hidden = true;
   if (controlsOpenedFromPause) { pauseMenu.hidden = false; controlsOpenedFromPause = false; }
 });
+
+// ---------- Auth: simple username/password, checked against server/users.json ----------
+// Not meant to be bulletproof security — this is a LAN party game, not a bank — but a real
+// username/password IS checked against the server on login/register (so you can't just claim
+// someone else's name without their password). Once verified, the browser remembers it
+// (`ruins_auth` in localStorage) so a reload — including the "Quit to Menu" flow, which is a
+// full `location.reload()` — goes straight back to the join/create tab instead of asking for
+// the password again every time.
+function getAuth() {
+  try { return JSON.parse(localStorage.getItem('ruins_auth') || 'null'); } catch { return null; }
+}
+function setAuth(username) { localStorage.setItem('ruins_auth', JSON.stringify({ username })); }
+function clearAuth() { localStorage.removeItem('ruins_auth'); }
+
+function showMenu(username) {
+  authScreen.hidden = true;
+  menuScreen.hidden = false;
+  accountLabel.textContent = `Signed in as ${username}`;
+  if (!nameInput.value) nameInput.value = username;
+}
+function showAuth() {
+  menuScreen.hidden = true;
+  authScreen.hidden = false;
+  authPassInput.value = '';
+  authError.textContent = '';
+  authUserInput.focus();
+}
+
+async function submitAuth(kind) {
+  const username = (authUserInput.value || '').trim();
+  const password = authPassInput.value || '';
+  authError.textContent = '';
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+    authError.textContent = 'Username must be 3-20 letters, numbers, or underscores.';
+    return;
+  }
+  if (password.length < 4) {
+    authError.textContent = 'Password must be at least 4 characters.';
+    return;
+  }
+  const btn = kind === 'login' ? authLoginBtn : authRegisterBtn;
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/${kind}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      authError.textContent = data.error || 'Something went wrong.';
+      return;
+    }
+    setAuth(username);
+    showMenu(username);
+  } catch (err) {
+    authError.textContent = 'Could not reach the server.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+authLoginBtn.addEventListener('click', () => submitAuth('login'));
+authRegisterBtn.addEventListener('click', () => submitAuth('register'));
+authPassInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth('login'); });
+authUserInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') authPassInput.focus(); });
+logoutBtn.addEventListener('click', () => { clearAuth(); showAuth(); });
+
+const savedAuth = getAuth();
+if (savedAuth && savedAuth.username) showMenu(savedAuth.username);
+else showAuth();
 
 // ---------- Sound: everything synthesized with WebAudio, no asset files ----------
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -280,6 +359,7 @@ let isProne = false;
 function setStance(crouch, prone) {
   isCrouched = crouch;
   isProne = prone;
+  stanceLabel.textContent = prone ? 'PRONE' : crouch ? 'CROUCHED' : 'STANDING';
 }
 let grenadeCount = GRENADE_START_COUNT;
 
@@ -466,6 +546,14 @@ function buildHorizon(theme) {
 // cheap-but-convincing "3D grass clump" technique, two perpendicular cards per clump so it
 // reads from most angles, not just face-on. Denser/bigger than a first pass at this would be —
 // "thick enough to actually hide a prone player in", not a light dusting of blades.
+// grass.png's own background-removal crop wasn't tight — the blades only occupy the middle
+// ~67% of the image vertically (rows 34-270 of 335), leaving a real ~19% fully-transparent
+// margin below them (and ~10% above). alphaTest discards that margin so it never draws, but
+// the PLANE's geometric bottom edge (where it used to be seated at ground level) sat a fifth of
+// the plane's height BELOW where the actual visible blades start — every clump floated with a
+// real gap underneath, not a rendering illusion (measured directly off the PNG's alpha
+// channel, not eyeballed: 64px transparent margin / 335px tall / 0.95 plane height).
+const GRASS_BOTTOM_MARGIN_Y = (64 / 335) * 0.95;
 function buildGrassPatches(patches) {
   const grassTex = loadPhotoTexture('/images/grass.png');
   const grassMat = new THREE.MeshStandardMaterial({ map: grassTex, transparent: true, alphaTest: 0.35, side: THREE.DoubleSide, roughness: 0.9 });
@@ -485,7 +573,7 @@ function buildGrassPatches(patches) {
       const s = 1.1 + Math.random() * 0.8;
       const baseRot = Math.random() * Math.PI;
       for (const rot of [baseRot, baseRot + Math.PI / 2]) {
-        dummy.position.set(cx, 0.46 * s, cz);
+        dummy.position.set(cx, (0.475 - GRASS_BOTTOM_MARGIN_Y) * s, cz);
         dummy.rotation.set(0, rot, 0);
         dummy.scale.set(s, s, s);
         dummy.updateMatrix();
@@ -663,6 +751,84 @@ function buildMudTexture() {
   return tex;
 }
 
+// Heraldic banner, hand-drawn (not a downloaded photo — there's no clean royalty-free source
+// for "castle banner PNG with a transparent point cut into the bottom", and the actual visual
+// reference used to get the proportions/details right was real banner photos: alternating
+// vertical fold-shading bands (cloth isn't flat-lit), a gold trim border + top rod pocket, a
+// simple gold emblem, and — the detail a flat colored box would have missed — the cloth
+// tapering to a single point at the bottom rather than a hard rectangular edge, which is what
+// actually reads as "banner" instead of "red sign".
+function buildBannerTexture() {
+  const W = 160, H = 352;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const bandW = W / 6;
+  for (let i = 0; i < 6; i++) {
+    ctx.fillStyle = i % 2 === 0 ? '#7a1010' : '#8c1616';
+    ctx.fillRect(i * bandW, 0, bandW + 1, H);
+  }
+  const grad = ctx.createLinearGradient(0, 0, W, 0);
+  grad.addColorStop(0, 'rgba(0,0,0,0.28)');
+  grad.addColorStop(0.5, 'rgba(255,255,255,0.08)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#c9a13a';
+  ctx.lineWidth = 6;
+  ctx.strokeRect(4, 4, W - 8, H - 8);
+  ctx.fillStyle = '#c9a13a';
+  ctx.fillRect(0, 0, W, 26); // rod pocket
+  ctx.beginPath(); ctx.arc(W / 2, 108, 32, 0, Math.PI * 2);
+  ctx.strokeStyle = '#c9a13a'; ctx.lineWidth = 5; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(W / 2, 88); ctx.lineTo(W / 2 + 17, 108); ctx.lineTo(W / 2, 128); ctx.lineTo(W / 2 - 17, 108);
+  ctx.closePath(); ctx.fillStyle = '#c9a13a'; ctx.fill();
+  // taper the bottom to a single point (real banner shape) by cutting away both bottom corners
+  ctx.globalCompositeOperation = 'destination-out';
+  const notchTopY = H * 0.78;
+  ctx.beginPath(); ctx.moveTo(0, notchTopY); ctx.lineTo(0, H); ctx.lineTo(W / 2, H); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(W, notchTopY); ctx.lineTo(W, H); ctx.lineTo(W / 2, H); ctx.closePath(); ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+  return new THREE.CanvasTexture(c);
+}
+
+// Climbing ivy, also hand-drawn against real reference (search: stone walls with mature ivy —
+// dense, leafy growth low down, thinning out into bare vine higher up, not a uniform carpet of
+// leaves top to bottom). A meandering stem climbs from the base with leaf clusters branching
+// off it, clustered and thick near the bottom, sparser near the top — same alpha-tested
+// crossed-plane technique already used for grass (see buildGrassPatches), just a taller/
+// narrower texture and a climbing pattern instead of a ground clump.
+function buildIvyTexture() {
+  const W = 128, H = 512;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const leafColors = ['rgba(40,90,35,0.92)', 'rgba(55,115,45,0.9)', 'rgba(75,130,55,0.85)'];
+  let x = W / 2 + (Math.random() - 0.5) * 16, y = H;
+  const climbTo = H * (0.15 + Math.random() * 0.15); // stops well short of the top — new growth, not a full carpet
+  ctx.strokeStyle = 'rgba(58,42,24,0.85)';
+  ctx.lineCap = 'round';
+  while (y > climbTo) {
+    const nx = Math.max(10, Math.min(W - 10, x + (Math.random() - 0.5) * 26));
+    const ny = y - (14 + Math.random() * 14);
+    ctx.lineWidth = 1.5 + (y / H) * 3.5; // thicker stem near the base
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(nx, ny); ctx.stroke();
+    const leafChance = 0.35 + 0.5 * (y / H); // denser leaf cover low down, per the reference photos
+    if (Math.random() < leafChance) {
+      const clusterCount = 2 + Math.floor(Math.random() * 3);
+      for (let k = 0; k < clusterCount; k++) {
+        const lx = nx + (Math.random() - 0.5) * 24, ly = ny + (Math.random() - 0.5) * 20;
+        const lr = 6 + Math.random() * 8;
+        ctx.fillStyle = leafColors[Math.floor(Math.random() * leafColors.length)];
+        ctx.beginPath();
+        ctx.ellipse(lx, ly, lr, lr * 0.65, Math.random() * Math.PI, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    x = nx; y = ny;
+  }
+  return new THREE.CanvasTexture(c);
+}
+
 function initScene(mapKey) {
   if (sceneReady) return;
   sceneReady = true;
@@ -723,8 +889,35 @@ function initScene(mapKey) {
   // Broken-parapet rubble, base debris, crenellations, decorative door panels — plain-tinted
   // boxes (no need for the full wall texture on tiny scattered chunks), non-collidable, purely
   // dressing. `rotY` (used by the mansion's door panels — one shut, one swung ajar) is optional.
+  // `img` (a poster/meme flush against a wall) swaps the box for a flat photo-textured plane
+  // instead — a real 3D crate doesn't make sense for a flat picture, and a plane avoids needing
+  // a material-per-face array just to keep the photo off the edges/back. `type:'banner'`/
+  // `type:'ivy'` are the same idea with a shared hand-drawn (canvas) texture built once and
+  // reused across every instance of that type, instead of one CanvasTexture per entry.
+  let bannerMat = null, ivyMat = null;
   for (const o of ACTIVE_DECOR) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(o.w, o.h, o.d), new THREE.MeshStandardMaterial({ color: o.color, roughness: 0.85 }));
+    let mesh;
+    if (o.type === 'banner') {
+      if (!bannerMat) bannerMat = new THREE.MeshStandardMaterial({ map: buildBannerTexture(), transparent: true, side: THREE.DoubleSide, roughness: 0.75 });
+      mesh = new THREE.Mesh(new THREE.PlaneGeometry(o.w, o.h), bannerMat);
+    } else if (o.type === 'ivy') {
+      if (!ivyMat) ivyMat = new THREE.MeshStandardMaterial({ map: buildIvyTexture(), transparent: true, alphaTest: 0.3, side: THREE.DoubleSide, roughness: 0.9 });
+      mesh = new THREE.Mesh(new THREE.PlaneGeometry(o.w, o.h), ivyMat);
+    } else if (o.img) {
+      // Photo posters (memes) use an UNLIT material, not MeshStandardMaterial like everything
+      // else here — these are flat printed/painted images, not glossy 3D surfaces that should
+      // react to the scene's directional sun light, and that light is strong (intensity up to
+      // 2.0) which was washing these out well past the source PNG's actual colors — especially
+      // since both memes deployed so far have large light/white background areas that bright
+      // PBR lighting blows out further. MeshBasicMaterial ignores scene lighting entirely and
+      // just shows the texture's real pixel colors, which is what "looks faded" was asking to
+      // fix — not a tint hack layered on top of the lighting problem.
+      const tex = loadPhotoTexture(`/images/${o.img}`);
+      const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+      mesh = new THREE.Mesh(new THREE.PlaneGeometry(o.w, o.h), mat);
+    } else {
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(o.w, o.h, o.d), new THREE.MeshStandardMaterial({ color: o.color, roughness: 0.85 }));
+    }
     mesh.position.set(o.x, o.y, o.z);
     if (o.rotY) mesh.rotation.y = o.rotY;
     scene.add(mesh);

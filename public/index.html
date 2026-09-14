@@ -22,7 +22,11 @@
   .panel { width: 420px; max-width: 92vw; background: rgba(20,18,14,0.9); border: 1px solid #4a4232; border-radius: 8px; padding: 28px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
   .panel h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: 2px; color: #d8c98a; }
   .panel .sub { margin: 0 0 20px; color: #948a70; font-size: 13px; }
-  input[type=text] { width: 100%; padding: 10px 12px; background: #1c1a15; border: 1px solid #4a4232; color: #e8e2d0; border-radius: 4px; font-size: 14px; margin-bottom: 12px; }
+  input[type=text], input[type=password] { width: 100%; padding: 10px 12px; background: #1c1a15; border: 1px solid #4a4232; color: #e8e2d0; border-radius: 4px; font-size: 14px; margin-bottom: 12px; }
+  #authError { color: #c94b4b; font-size: 12px; margin: -6px 0 12px; min-height: 14px; }
+  #accountBar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  #accountBar .sub { margin: 0; }
+  #logoutBtn { padding: 5px 10px; font-size: 11px; }
   button { cursor: pointer; border: none; border-radius: 4px; padding: 10px 16px; font-size: 14px; font-weight: 600; letter-spacing: 0.5px; }
   .btn-primary { background: #b3924a; color: #1a1710; width: 100%; }
   .btn-primary:hover { background: #c9a758; }
@@ -46,6 +50,7 @@
   #healthBar { height: 18px; background: #1c1a15; border: 1px solid #4a4232; border-radius: 3px; overflow: hidden; }
   #healthFill { height: 100%; width: 100%; background: linear-gradient(90deg,#7a2b2b,#c94b4b); transition: width 0.15s; }
   #healthLabel { font-size: 12px; color: #948a70; margin-bottom: 4px; }
+  #stanceLabel { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; color: #d8c98a; margin-bottom: 6px; }
   #killFeed { position: absolute; top: 16px; right: 16px; width: 260px; text-align: right; }
   #killFeed div { background: rgba(20,18,14,0.75); border: 1px solid #332f24; border-radius: 3px; padding: 6px 10px; margin-bottom: 4px; font-size: 12px; }
   #roomTag { position: absolute; top: 16px; left: 16px; font-size: 12px; color: #6b6350; }
@@ -86,8 +91,24 @@
 </head>
 <body>
 
-<div id="menuScreen" class="screen">
+<div id="authScreen" class="screen">
   <div class="panel">
+    <h1>RUINS</h1>
+    <p class="sub">sign in to play · one simple account per player</p>
+    <input id="authUserInput" type="text" maxlength="20" placeholder="Username" autocomplete="username" />
+    <input id="authPassInput" type="password" maxlength="64" placeholder="Password" autocomplete="current-password" />
+    <p id="authError"></p>
+    <button id="authLoginBtn" class="btn-primary" style="width:100%;margin-bottom:10px;">Log In</button>
+    <button id="authRegisterBtn" class="btn-secondary" style="width:100%;">Create Account</button>
+  </div>
+</div>
+
+<div id="menuScreen" class="screen" hidden>
+  <div class="panel">
+    <div id="accountBar">
+      <span id="accountLabel" class="sub"></span>
+      <button id="logoutBtn" class="btn-secondary">Log Out</button>
+    </div>
     <h1>RUINS</h1>
     <p class="sub">first-person LAN skirmish · guns &amp; melee</p>
     <input id="nameInput" type="text" maxlength="16" placeholder="Your name" />
@@ -156,6 +177,7 @@
   <canvas id="minimap" width="150" height="150"></canvas>
   <div id="healthWrap">
     <div id="healthLabel">HEALTH</div>
+    <div id="stanceLabel">STANDING</div>
     <div id="healthBar"><div id="healthFill"></div></div>
   </div>
   <div id="weaponBar"></div>

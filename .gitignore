@@ -10,6 +10,9 @@ npm-debug.log*
 .env
 .env.*
 
+# Local account data (salted password hashes) — never committed
+server/users.json
+
 # OS/editor cruft
 .DS_Store
 Thumbs.db
