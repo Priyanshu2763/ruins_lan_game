@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import {
-  WEAPONS, FLOOR, getMapLayout, MAP_BOUNDS, MAX_HEALTH, MAPS, DEFAULT_MAP,
+  WEAPONS, FLOOR, getMapLayout, MAP_BOUNDS, MAX_HEALTH, MAPS, DEFAULT_MAP, RESPAWN_MS,
   STAND_EYE_HEIGHT, CROUCH_EYE_HEIGHT, PRONE_EYE_HEIGHT, PLAYER_RADIUS, PRONE_SPEED,
+  HEAD_CENTER_Y, HEAD_HALF, CROUCH_SCALE_Y,
   GRENADE_COOLDOWN_MS, GRENADE_RADIUS, GRENADE_VISUAL_RADIUS, GRENADE_BLAST_RADIUS,
   GRENADE_THROW_SPEED, GRENADE_START_COUNT, GRENADE_MAX_CARRY, GRENADE_ICON, GRENADE_IMAGE,
 } from '/shared/gameData.js';
@@ -124,6 +125,44 @@ const dmgFlash = document.createElement('div');
 dmgFlash.style.cssText = 'position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at center, rgba(200,20,20,0) 40%, rgba(200,20,20,0.45) 100%);opacity:0;transition:opacity 0.4s;z-index:5;';
 document.body.appendChild(dmgFlash);
 
+// Death/respawn "eyelids" — two black panels sliding in from the top/bottom edges with a
+// curved leading edge (border-radius on the meeting side) so they read as lids closing over
+// the view rather than a flat wipe. Height is driven every frame by setEyelidCoverage() during
+// the death-fall and respawn sequences (see updateDeathAnim/onLocalRespawn) rather than a CSS
+// transition, so it can be kept in exact sync with the fall/respawn audio clips' real length.
+const eyelidTop = document.createElement('div');
+eyelidTop.style.cssText = 'position:fixed;top:0;left:0;right:0;height:0;background:linear-gradient(#050403,#0a0806);pointer-events:none;z-index:7;border-bottom-left-radius:50% 40px;border-bottom-right-radius:50% 40px;';
+const eyelidBottom = document.createElement('div');
+eyelidBottom.style.cssText = 'position:fixed;bottom:0;left:0;right:0;height:0;background:linear-gradient(#0a0806,#050403);pointer-events:none;z-index:7;border-top-left-radius:50% 40px;border-top-right-radius:50% 40px;';
+document.body.appendChild(eyelidTop);
+document.body.appendChild(eyelidBottom);
+// pct: 0 = fully open (no coverage), 1 = fully closed (screen fully black). Each lid goes a
+// touch past 50vh so the curved edges still meet with full coverage at pct=1, not just the
+// flat parts. Tracks the last value it was set to (eyelidPct) so a later caller — the respawn
+// open sequence — can start from wherever the lids actually are instead of assuming 1, in case
+// the server's respawn message lands slightly before/after the death close finishes.
+let eyelidPct = 0;
+function setEyelidCoverage(pct) {
+  eyelidPct = Math.max(0, Math.min(1, pct));
+  const h = eyelidPct * 54;
+  eyelidTop.style.height = h + 'vh';
+  eyelidBottom.style.height = h + 'vh';
+}
+// Reverse of the death close — eyes opening back up as the player wakes up at their new spawn,
+// synced to respawn.mp3's length. Self-driving rAF loop (same pattern as spawnExplosion's
+// flash animation) since it only runs for ~1.5s right at respawn, not worth a persistent flag
+// in the main animate() loop.
+function openEyelids() {
+  const start = performance.now();
+  const startPct = eyelidPct;
+  const DURATION = 1500; // respawn.mp3's measured length
+  (function step() {
+    const t = Math.min(1, (performance.now() - start) / DURATION);
+    setEyelidCoverage(startPct * (1 - easeOutCubic(t)));
+    if (t < 1) requestAnimationFrame(step);
+  })();
+}
+
 const weaponBar = document.getElementById('weaponBar');
 const pickupToast = document.getElementById('pickupToast');
 const mapSelect = document.getElementById('mapSelect');
@@ -213,6 +252,44 @@ const savedAuth = getAuth();
 if (savedAuth && savedAuth.username) showMenu(savedAuth.username);
 else showAuth();
 
+// Every button in the UI gets 2 small blood-stain decals, picked randomly per button so no two
+// look the same — random source image per decal (both provided splatter photos get used, not
+// just one), random size/rotation/flip, 2 DIFFERENT corners (sampled without replacement, so
+// the pair doesn't land on top of each other) for denser coverage than a single decal gave.
+// Real <img> elements showing the WHOLE splatter photo (scaled/rotated), not a background-
+// image crop into one region of it — the crop approach rendered as a visible hard-edged
+// rectangle in testing instead of the organic splatter shape (same issue as the match-end
+// screen's stains, see index.html), so this avoids that whole class of bug rather than trying
+// to fix the crop math blind, without a real browser here to verify it in.
+// Runs once at load over every <button> that exists in the static HTML — buttons created later
+// (there aren't any, all of this game's controls are static markup, just shown/hidden) would
+// miss out, but nothing in this UI works that way.
+function decorateButtonsWithBlood() {
+  const images = ['/images/blood_splat1.png', '/images/blood_splat2.png'];
+  const corners = [
+    { top: '-8px', left: '-8px' }, { top: '-8px', right: '-8px' },
+    { bottom: '-8px', left: '-8px' }, { bottom: '-8px', right: '-8px' },
+  ];
+  document.querySelectorAll('button').forEach((btn) => {
+    if (getComputedStyle(btn).position === 'static') btn.style.position = 'relative';
+    const shuffled = [...corners].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < 2; i++) {
+      const decal = document.createElement('img');
+      decal.className = 'btnBloodDecal';
+      decal.alt = '';
+      decal.src = images[Math.floor(Math.random() * images.length)];
+      const size = 16 + Math.random() * 14; // 16-30px — small enough to stay out of the label's way
+      decal.style.width = `${size}px`;
+      const rot = Math.floor(Math.random() * 360);
+      const flip = Math.random() < 0.5 ? -1 : 1;
+      decal.style.transform = `rotate(${rot}deg) scaleX(${flip})`;
+      Object.assign(decal.style, shuffled[i]);
+      btn.appendChild(decal);
+    }
+  });
+}
+decorateButtonsWithBlood();
+
 // ---------- Sound: real recorded clips for weapons/grenade, synthesized WebAudio for
 // everything else (hit markers, pickups, damage, melee, the grenade throw cue — no recording
 // was provided for those) ----------
@@ -235,6 +312,14 @@ const SOUND_FILES = {
   shotgunReload: '/sounds/shotgun-reload.mp3',
   grenadeClock: '/sounds/grenade-clock.mp3',
   grenadeExplosion: '/sounds/grenade-explosion.mp3',
+  gameOver: '/sounds/game-over.mp3',
+  background: '/sounds/backround.mp3',
+  ring: '/sounds/ring.mp3',
+  knifeStab: '/sounds/knife-stab.mp3',
+  running: '/sounds/running.mp3',
+  walking: '/sounds/walking.mp3',
+  fall: '/sounds/fall.mp3',
+  respawn: '/sounds/respawn.mp3',
 };
 const soundBuffers = {};
 for (const [key, url] of Object.entries(SOUND_FILES)) {
@@ -260,6 +345,28 @@ function playBuffer(key, { gain = 1, loop = false } = {}) {
   src.connect(g); g.connect(audioCtx.destination);
   src.start();
   return src;
+}
+
+// Ear-ringing effect for anyone actually caught in a grenade blast (see the 'hit' handler —
+// server tags grenade damage with weapon:'Grenade' specifically so this doesn't fire on every
+// hit). Flat/non-positional on purpose — this represents damage to YOUR OWN ears, not a world
+// sound to localize. Plays the full 4.2s clip at full volume, then fades to silent over the
+// last ~0.8s ("at last it fades away") via a real gain ramp — the source clip itself doesn't
+// need to have that fade baked in.
+function playRingEffect() {
+  const buffer = soundBuffers.ring;
+  if (!buffer) return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buffer;
+  const g = audioCtx.createGain();
+  const t0 = audioCtx.currentTime;
+  const dur = buffer.duration;
+  const fadeDur = Math.min(0.8, dur * 0.3);
+  g.gain.setValueAtTime(1, t0);
+  g.gain.setValueAtTime(1, t0 + dur - fadeDur);
+  g.gain.linearRampToValueAtTime(0, t0 + dur);
+  src.connect(g); g.connect(audioCtx.destination);
+  src.start();
 }
 
 // ---------- Positional audio (remote gunfire + explosions): real 3D panning/distance falloff
@@ -328,6 +435,11 @@ function localListenerPos() {
   camera.getWorldPosition(v);
   return [v.x, v.y, v.z];
 }
+function localListenerForward() {
+  const v = new THREE.Vector3();
+  camera.getWorldDirection(v);
+  return [v.x, v.y, v.z];
+}
 
 function makePannerAt(pos) {
   const panner = audioCtx.createPanner();
@@ -339,11 +451,35 @@ function makePannerAt(pos) {
   panner.positionX.value = pos[0]; panner.positionY.value = pos[1]; panner.positionZ.value = pos[2];
   return panner;
 }
+// A "dry" companion position for the wet/dry blend below — same DISTANCE from the listener as
+// the real source (so it inherits the exact same distance-falloff curve for free, reusing the
+// browser's own panner math instead of hand-rolling the 'inverse' distance formula a second
+// time), but placed dead along the listener's own forward vector, i.e. "straight ahead" —
+// which panningModel:'equalpower' resolves to a clean, guaranteed-symmetric 50/50 split
+// between ears. Recomputed on every reposition (see updatePositionalTarget / the grenade-tick
+// loop in animate()) since "straight ahead" only stays straight ahead as the listener turns.
+function dryPositionFor(sourcePos) {
+  const lp = localListenerPos();
+  const lf = localListenerForward();
+  const dist = Math.hypot(sourcePos[0] - lp[0], sourcePos[1] - lp[1], sourcePos[2] - lp[2]);
+  return [lp[0] + lf[0] * dist, lp[1] + lf[1] * dist, lp[2] + lf[2] * dist];
+}
+// Pure HRTF panning is TOO extreme for gameplay comfort — a source directly to one side reads
+// at near-zero in the off ear, which is physically accurate (that's genuinely what real ears
+// do) but disorienting, and HRTF's exact character varies by browser/headphones on top of that.
+// Real shooters don't ship raw HRTF for this reason — they blend a fully-panned "wet" copy with
+// a smaller always-centered "dry" copy of the SAME sound, so the off ear keeps a real floor of
+// presence instead of dropping out. SPATIAL_WET+SPATIAL_DRY intentionally sum to just over 1 —
+// the goal is "the near ear stays at ~its normal unblended level", not "total loudness must
+// stay fixed", so adding the dry floor doesn't quietly dim the near ear to compensate.
+const SPATIAL_WET = 0.68;
+const SPATIAL_DRY = 0.34;
 // A lowpass filter is ALWAYS in the chain (even a wide-open one when not occluded) rather than
 // conditionally inserted — swapping its cutoff/gain is one param write, cheaper and simpler
 // than rewiring the audio graph. Occluded: heavy lowpass + reduced gain — real walls absorb
 // high frequencies far more than low ones, so a muffled thump-through-a-wall reads as duller,
-// not just quieter, which pure gain reduction wouldn't capture.
+// not just quieter, which pure gain reduction wouldn't capture. Applied ONCE, after the wet and
+// dry paths are already summed — a wall muffles the whole arriving sound, not one path of it.
 function applyOcclusionParams(filter, gainNode, baseGain, occluded) {
   filter.frequency.value = occluded ? 900 : 20000;
   gainNode.gain.value = occluded ? baseGain * 0.45 : baseGain;
@@ -354,20 +490,33 @@ function startPositionalSource(key, pos, gain, loop) {
   const src = audioCtx.createBufferSource();
   src.buffer = buffer;
   src.loop = loop;
-  const panner = makePannerAt(pos);
-  const filter = audioCtx.createBiquadFilter();
+
+  const wetPanner = makePannerAt(pos);
+  const wetGain = audioCtx.createGain();
+  wetGain.gain.value = gain * SPATIAL_WET;
+
+  const dryPanner = makePannerAt(dryPositionFor(pos));
+  dryPanner.panningModel = 'equalpower'; // guaranteed-centered when "straight ahead", unlike HRTF's real-ear-modeled frontal response
+  const dryGain = audioCtx.createGain();
+  dryGain.gain.value = gain * SPATIAL_DRY;
+
+  const filter = audioCtx.createBiquadFilter(); // shared, post-mix — see applyOcclusionParams
   filter.type = 'lowpass';
-  const g = audioCtx.createGain();
-  applyOcclusionParams(filter, g, gain, isOccludedBetween(localListenerPos(), pos));
-  src.connect(panner); panner.connect(filter); filter.connect(g); g.connect(audioCtx.destination);
+  const mixGain = audioCtx.createGain();
+
+  src.connect(wetPanner); wetPanner.connect(wetGain); wetGain.connect(filter);
+  src.connect(dryPanner); dryPanner.connect(dryGain); dryGain.connect(filter); // WebAudio sums multiple inputs into one node automatically
+  filter.connect(mixGain); mixGain.connect(audioCtx.destination);
+
+  applyOcclusionParams(filter, mixGain, 1, isOccludedBetween(localListenerPos(), pos));
   src.start();
-  return { source: src, panner, filter, gainNode: g, gain };
+  return { source: src, wetPanner, dryPanner, filter, gainNode: mixGain, gain };
 }
-// Returns the same trackable handle as the loop version (panner/filter/gainNode) — most
-// one-shot callers (explosions) just ignore it, but a one-shot can still be LONG (the grenade
-// tick clip is 3.657s) and the thing making the sound can keep moving for all of that, so a
-// caller that wants to keep its panner position (and occlusion) current over that time — see
-// updatePositionalTarget below, used for the grenade tick — needs a handle to update.
+// Returns the same trackable handle as the loop version (wetPanner/dryPanner/filter/gainNode) —
+// most one-shot callers (explosions) just ignore it, but a one-shot can still be LONG (the
+// grenade tick clip is 3.657s) and the thing making the sound can keep moving for all of that,
+// so a caller that wants to keep its panners' positions (and occlusion) current over that time
+// — see updatePositionalTarget below, used for the grenade tick — needs a handle to update.
 function playPositionalOneShot(key, pos, gain = 1) {
   return startPositionalSource(key, pos, gain, false);
 }
@@ -375,11 +524,14 @@ function playPositionalLoopStart(key, pos, gain = 1) {
   return startPositionalSource(key, pos, gain, true);
 }
 // Shared by the AKM's remote loop (repositioned on each incoming shotFired) and the grenade
-// tick (repositioned every frame to track the live grenade, see animate()) — just moves the
-// panner and re-runs the occlusion check against the new position.
+// tick (repositioned every frame to track the live grenade, see animate()) — moves BOTH panners
+// (the dry one recomputed fresh since "straight ahead" changes as the listener turns) and
+// re-runs the occlusion check against the true source position.
 function updatePositionalTarget(entry, pos) {
-  entry.panner.positionX.value = pos[0]; entry.panner.positionY.value = pos[1]; entry.panner.positionZ.value = pos[2];
-  applyOcclusionParams(entry.filter, entry.gainNode, entry.gain, isOccludedBetween(localListenerPos(), pos));
+  entry.wetPanner.positionX.value = pos[0]; entry.wetPanner.positionY.value = pos[1]; entry.wetPanner.positionZ.value = pos[2];
+  const dp = dryPositionFor(pos);
+  entry.dryPanner.positionX.value = dp[0]; entry.dryPanner.positionY.value = dp[1]; entry.dryPanner.positionZ.value = dp[2];
+  applyOcclusionParams(entry.filter, entry.gainNode, 1, isOccludedBetween(localListenerPos(), pos));
 }
 
 function tone(freq, dur, type, gain, glideTo) {
@@ -427,7 +579,7 @@ function noiseBurst(dur, gain, filterFreq, filterType) {
 // all for the AKM; the continuous loop IS its firing sound.
 const sfx = {
   shoot(w) {
-    if (w.type === 'melee') { tone(180, 0.06, 'square', 0.12, 90); return; }
+    if (w.type === 'melee') { playBuffer('knifeStab'); return; }
     if (w.id === 0) return; // AKM — handled by the looped spray clip, not per-shot
     if (w.id === 1) { playBuffer('shotgunFire'); return; }
     if (w.id === 2) { playBuffer('glockFire'); return; }
@@ -456,14 +608,20 @@ const sfx = {
   // the visual mesh position already gets lerped from. GRENADE_FUSE_MS is set to this clip's
   // exact 3657ms length so the explosion lands right as the ticking finishes, not mid-tick.
   grenadeTick(pos) { return playPositionalOneShot('grenadeClock', pos); },
-  // 2x gain — the recording as provided reads quiet next to the rest of the mix.
-  // Positional now (not flat/global) — the blast happens at a world position distinct from
-  // where any given player currently stands (including the thrower, who may have moved off),
-  // so unlike your own gunfire this always goes through the panner/occlusion path. 2x gain
-  // (same boost as before) is the sound's OWN base loudness before distance falloff applies.
-  explosion(pos) { playPositionalOneShot('grenadeExplosion', pos, 2); },
+  // 3.5x gain now (was 2x — still came back "too low" after that first bump). Positional, not
+  // flat/global — the blast happens at a world position distinct from where any given player
+  // currently stands (including the thrower, who may have moved off), so unlike your own
+  // gunfire this always goes through the panner/occlusion path; the gain here is the sound's
+  // OWN base loudness before distance falloff applies on top of it.
+  explosion(pos) { playPositionalOneShot('grenadeExplosion', pos, 3.5); },
   pickup() { tone(700, 0.07, 'sine', 0.12, 1100); setTimeout(() => tone(1100, 0.08, 'sine', 0.1, 1500), 70); },
-  death() { tone(300, 0.3, 'sawtooth', 0.16, 60); },
+  // Flat/non-positional, like the grenade ear-ring (batch 46) — this is the sound of YOUR OWN
+  // view collapsing to the ground, not a world event other players need to localize.
+  fall() { playBuffer('fall'); },
+  // Positional — the respawn "beam" (see spawnRespawnEffect) is a real world-space visual
+  // around the character, so anyone nearby should hear it fade in with distance too, same
+  // treatment as every other world event (gunfire/explosions/footsteps).
+  respawnBeam(pos) { return playPositionalOneShot('respawn', pos, 1.5); },
 };
 
 // ---------- Networking / lobby ----------
@@ -508,11 +666,17 @@ function currentName() {
   return n;
 }
 
-// "HH:MM" from the native time input -> total minutes. 00:00 (or empty/unset) means no limit.
-function parseDurationMin(hhmm) {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || '');
+// The time input now has `step="1"` (index.html) so its native picker shows a seconds field
+// too — once a `<input type=time>` allows sub-minute precision, its `.value` format switches
+// from "HH:MM" to "HH:MM:SS" on its own (that's the browser's behavior, not something set
+// here). Parses either shape and returns total SECONDS (not minutes — minute-only granularity
+// is exactly the limitation this was asked to fix), seconds group optional so an old/blank
+// "HH:MM" value (or a browser that still reports one at :00 seconds) still parses correctly.
+function parseDurationSec(hms) {
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(hms || '');
   if (!m) return 0;
-  return Math.max(0, parseInt(m[1], 10) * 60 + parseInt(m[2], 10));
+  const hh = parseInt(m[1], 10), mm = parseInt(m[2], 10), ss = m[3] ? parseInt(m[3], 10) : 0;
+  return Math.max(0, hh * 3600 + mm * 60 + ss);
 }
 
 // Defaults ON — the toggle only needs to be touched to turn memes OFF, not to opt in.
@@ -527,8 +691,8 @@ memeModeToggle.addEventListener('click', () => {
 createBtn.addEventListener('click', () => {
   sendMsg({ type: 'hello', name: currentName() });
   const rn = (roomNameInput.value || 'Ruins Match').trim().slice(0, 24) || 'Ruins Match';
-  const durationMin = parseDurationMin(matchDurationInput.value);
-  sendMsg({ type: 'createRoom', roomName: rn, map: mapSelect.value || DEFAULT_MAP, durationMin, memeMode: memeModeOn });
+  const durationSec = parseDurationSec(matchDurationInput.value);
+  sendMsg({ type: 'createRoom', roomName: rn, map: mapSelect.value || DEFAULT_MAP, durationSec, memeMode: memeModeOn });
 });
 
 matchEndQuitBtn.addEventListener('click', () => { location.reload(); });
@@ -1248,31 +1412,16 @@ function onResize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-function nameSpriteFor(name) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256; canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  ctx.font = 'bold 32px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillRect(0, 0, 256, 64);
-  ctx.fillStyle = '#e8e2d0';
-  ctx.fillText(name, 128, 42);
-  const tex = new THREE.CanvasTexture(canvas);
-  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
-  const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(2, 0.5, 1);
-  sprite.position.set(0, 2.3, 0);
-  return sprite;
-}
-
 function colorForId(id) {
   const c = new THREE.Color();
   c.setHSL((id * 0.157) % 1, 0.55, 0.55);
   return c;
 }
 
-const HIP_Y = 0.9, SHOULDER_Y = 1.45, HEAD_Y = 1.7;
+// HEAD_Y/head box size come from gameData.js (HEAD_CENTER_Y/HEAD_HALF) — shared with the
+// server's hit-cylinder/headshot logic so the visual head and the hittable head can't drift
+// apart again (see handleAttack, server/index.js).
+const HIP_Y = 0.9, SHOULDER_Y = 1.45, HEAD_Y = HEAD_CENTER_Y;
 
 function buildCharacterFigure(id, name) {
   const root = new THREE.Group(); // origin at feet (y=0) so crouch scaling just works
@@ -1283,7 +1432,7 @@ function buildCharacterFigure(id, name) {
   torso.position.set(0, HIP_Y + 0.35, 0);
   root.add(torso);
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.32, 0.32), skin);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(HEAD_HALF * 2, HEAD_HALF * 2, HEAD_HALF * 2), skin);
   head.position.set(0, HEAD_Y, 0);
   root.add(head);
 
@@ -1305,10 +1454,6 @@ function buildCharacterFigure(id, name) {
   const armL = limb(skin, 0.15, armLen, 0.15, SHOULDER_Y, -armLen / 2);
   const armR = limb(skin, 0.15, armLen, 0.15, SHOULDER_Y, -armLen / 2);
   armL.position.x = -0.34; armR.position.x = 0.34;
-
-  const sprite = nameSpriteFor(name);
-  sprite.position.set(0, HEAD_Y + 0.55, 0);
-  root.add(sprite);
 
   // A weapon silhouette in the right hand — swapped by visibility per equipped weapon, so an
   // enemy reads as armed with something specific instead of a bare-handed generic figure.
@@ -1337,7 +1482,7 @@ function createRemote(id, name, pos) {
   fig.root.position.set(pos[0], pos[1] || 0, pos[2]);
   scene.add(fig.root);
   remotePlayers.set(id, {
-    mesh: fig.root, legL: fig.legL, legR: fig.legR, armL: fig.armL, armR: fig.armR,
+    id, mesh: fig.root, legL: fig.legL, legR: fig.legR, armL: fig.armL, armR: fig.armR,
     heldGuns: fig.heldGuns, weapon: 0,
     targetPos: new THREE.Vector3(pos[0], pos[1] || 0, pos[2]), targetRotY: 0,
     walkPhase: 0, moving: false, crouch: false, prone: false,
@@ -1349,6 +1494,25 @@ function removeRemote(id) {
   if (!rp) return;
   scene.remove(rp.mesh);
   remotePlayers.delete(id);
+  setRemoteFootstepMode(id, null, null); // don't leave a loop orphaned if they disconnect mid-stride
+}
+
+// Other players' footsteps — positional (full base gain, distance/occlusion do the fading,
+// exactly like gunfire), unlike your own which are flat and deliberately quieter (see
+// setFootstepMode above). Same "one swappable loop per source, no timeout needed" idea as the
+// AKM's remote spray loop, but simpler here: that one had to guess "are they still firing"
+// from a timeout between discrete shot events, while movement state arrives continuously
+// (every `state` tick, ~20Hz) so the mode is just directly known, no inference required.
+const remoteFootstepLoops = new Map(); // playerId -> { mode, loop }
+function setRemoteFootstepMode(playerId, mode, pos) {
+  const entry = remoteFootstepLoops.get(playerId);
+  if (entry && entry.mode === mode) return;
+  if (entry && entry.loop) { try { entry.loop.source.stop(); } catch { /* already finished */ } }
+  remoteFootstepLoops.delete(playerId);
+  if (mode === 'run' || mode === 'walk') {
+    const loop = playPositionalLoopStart(mode === 'run' ? 'running' : 'walking', pos, 1);
+    if (loop) remoteFootstepLoops.set(playerId, { mode, loop });
+  }
 }
 
 const textureLoader = new THREE.TextureLoader();
@@ -1502,6 +1666,54 @@ function smokeSpriteTexture() {
 }
 const smokeTex = smokeSpriteTexture();
 
+// Respawn "beam-in" — light circles pulsing outward from the ground plus a soft glowing column,
+// like a spaceship's tractor beam, synced to respawn.mp3 (~1.5s). Triggered from every incoming
+// `respawn` broadcast (server already sends id/pos/health to the whole room, not just the
+// respawning player), so anyone nearby sees a teammate or enemy visibly reappear, not just the
+// player it happened to.
+function spawnRespawnEffect(pos) {
+  sfx.respawnBeam(pos);
+  const DURATION = 1500; // respawn.mp3's measured length
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x8fe8ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+  const ringGeo = new THREE.RingGeometry(0.55, 0.72, 40);
+  const rings = [0, 140, 280].map((delay) => {
+    const mat = ringMat.clone();
+    const mesh = new THREE.Mesh(ringGeo, mat);
+    mesh.rotation.x = -Math.PI / 2; // flat on the ground
+    mesh.position.set(pos[0], pos[1] + 0.05, pos[2]);
+    mesh.scale.setScalar(0.01);
+    scene.add(mesh);
+    return { mesh, mat, delay };
+  });
+  const beamMat = new THREE.MeshBasicMaterial({ color: 0xcdfaff, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.32, 2.6, 24, 1, true), beamMat);
+  beam.position.set(pos[0], pos[1] + 1.3, pos[2]);
+  scene.add(beam);
+
+  const start = performance.now();
+  (function anim() {
+    const elapsed = performance.now() - start;
+    let allDone = true;
+    for (const r of rings) {
+      const t = Math.max(0, Math.min(1, (elapsed - r.delay) / (DURATION - r.delay)));
+      if (t < 1) allDone = false;
+      r.mesh.scale.setScalar(0.4 + t * 3.2);
+      r.mat.opacity = 0.85 * (1 - t);
+    }
+    const bt = Math.min(1, elapsed / DURATION);
+    if (bt < 1) allDone = false;
+    beamMat.opacity = 0.5 * (1 - bt);
+    beam.scale.y = 1 + bt * 0.4;
+    if (allDone) {
+      for (const r of rings) { scene.remove(r.mesh); r.mat.dispose(); }
+      ringGeo.dispose(); ringMat.dispose();
+      scene.remove(beam); beam.geometry.dispose(); beamMat.dispose();
+      return;
+    }
+    requestAnimationFrame(anim);
+  })();
+}
+
 function spawnExplosion(pos) {
   sfx.explosion(pos);
   // bright blast flash — additive, expands and fades fast
@@ -1646,6 +1858,7 @@ function handleMessage(msg) {
         rp.prone = !!p.prone;
         rp.moving = !!p.moving;
         rp.weapon = p.weapon;
+        setRemoteFootstepMode(p.id, !p.alive || !p.moving ? null : p.sprint ? 'run' : 'walk', p.pos);
       }
       if (Array.isArray(msg.grenades)) syncGrenades(msg.grenades);
       if (Array.isArray(msg.pickups)) syncPickups(msg.pickups);
@@ -1677,7 +1890,11 @@ function handleMessage(msg) {
       break;
     case 'hit':
       if (msg.shooterId === localId) showHitMarker();
-      if (msg.targetId === localId) { setHealth(msg.health); flashDamage(); }
+      if (msg.targetId === localId) {
+        setHealth(msg.health);
+        flashDamage();
+        if (msg.weapon === 'Grenade') playRingEffect();
+      }
       break;
     case 'killed':
       if (msg.killerId === null) {
@@ -1685,11 +1902,12 @@ function handleMessage(msg) {
       } else {
         pushKillFeed(`${msg.killerName} eliminated ${msg.victimName} with ${msg.weapon || 'Unknown'}`);
       }
-      if (msg.victimId === localId) { onLocalDeath(msg.killerId === null ? null : msg.killerName); sfx.death(); }
+      if (msg.victimId === localId) onLocalDeath(msg.killerId === null ? null : msg.killerName); // plays sfx.fall() itself, in sync with the fall-camera sequence it starts
       break;
     case 'respawn': {
       const rp = remotePlayers.get(msg.id);
       if (rp) { rp.mesh.position.set(msg.pos[0], 0, msg.pos[2]); rp.targetPos.copy(rp.mesh.position); rp.mesh.visible = true; }
+      if (sceneReady) spawnRespawnEffect(msg.pos); // every respawn, local or remote -- anyone nearby sees/hears it
       if (msg.id === localId) onLocalRespawn(msg.pos, msg.health);
       break;
     }
@@ -1705,16 +1923,37 @@ function handleMessage(msg) {
   }
 }
 
+// Background music — one looping source for the whole match, 2x gain (the recording as
+// provided reads quiet, same reason the explosion/reload clips got boosted). Flat/non-
+// positional (it's a soundtrack, not a world sound) using the same loop-handle pattern as the
+// AKM's spray loop: keep the source so it can be stopped explicitly rather than left running
+// under the game-over sting.
+let backgroundMusicSource = null;
+function startBackgroundMusic() {
+  if (backgroundMusicSource) return; // already playing — joining mid-match shouldn't restart it
+  backgroundMusicSource = playBuffer('background', { loop: true, gain: 2 });
+}
+function stopBackgroundMusic() {
+  if (!backgroundMusicSource) return;
+  try { backgroundMusicSource.stop(); } catch { /* already finished */ }
+  backgroundMusicSource = null;
+}
+
 function onMatchEnded(list) {
   matchOver = true;
   matchTimer.hidden = true;
   localAlive = false; // freezes movement/firing via their existing localAlive checks
   if (fireIntervalId) { clearInterval(fireIntervalId); fireIntervalId = null; }
+  stopAkmLoop(); // a stray spray loop still playing under the game-over sound would undercut it
+  stopBackgroundMusic(); // same reason — let the game-over sting land clean, not under the loop
   if (document.pointerLockElement) document.exitPointerLock();
   pauseMenu.hidden = true;
   scoreboard.hidden = true;
   renderBoardInto(matchEndBody, list);
-  matchEndScreen.hidden = false;
+  matchEndScreen.hidden = false; // unhiding a freshly-visible element replays its CSS
+  // animation from the start — the GAME OVER title/blood-splat entrance (see index.html) only
+  // ever needs to run once per match anyway, since "Quit to Menu" is a full page reload.
+  playBuffer('gameOver');
 }
 
 let matchEndsAt = null;
@@ -1730,6 +1969,7 @@ function onJoined(msg) {
   matchEndsAt = msg.matchEndsAt || null;
   matchOver = false;
   matchTimer.hidden = !matchEndsAt;
+  startBackgroundMusic();
 
   initScene(msg.map || DEFAULT_MAP, msg.memeMode !== false);
   playerX = msg.players.find((p) => p.id === localId)?.pos[0] ?? 0;
@@ -1775,11 +2015,38 @@ function flashDamage() {
 }
 
 function showHitMarker() {
-  crosshair.style.background = '#e04b4b';
-  crosshair.style.transform = 'translate(-50%,-50%) scale(1.8)';
-  setTimeout(() => { crosshair.style.background = ''; crosshair.style.transform = ''; }, 120);
+  crosshair.style.setProperty('--ch-color', '#e04b4b');
+  crosshair.style.transform = 'scale(1.8)';
+  setTimeout(() => { crosshair.style.removeProperty('--ch-color'); crosshair.style.transform = ''; }, 120);
   sfx.hitMarker();
 }
+
+// Fire bloom: kick the ticks out fast (no easing in, matches the snap of a recoiling gun),
+// then let the existing 140ms ease-out transition (see #crosshair .ch-tick in index.html)
+// pull them back to the sprint-aware base --spread on its own.
+let crosshairKickTimer = null;
+function crosshairKick() {
+  crosshair.style.setProperty('--extra', '6px');
+  clearTimeout(crosshairKickTimer);
+  crosshairKickTimer = setTimeout(() => { crosshair.style.setProperty('--extra', '0px'); }, 70);
+}
+
+// Death-fall camera sequence: the view drops to near-ground and tilts to look straight up
+// ("falls to the ground flat, face/camera to the sky"), synced to fall.mp3's exact length,
+// while the eyelid overlay flutters (a couple of quick blinks) then slowly closes to black
+// over the rest of the RESPAWN_MS window — landing fully shut right as the server's actual
+// respawn arrives. Driven from animate() (see updateDeathAnim) rather than a CSS transition so
+// it can react to the live eyeHeight/pitch at the moment of death and to whatever stance the
+// player was in.
+const DEATH_FALL_MS = 1848; // fall.mp3's measured length (mutagen) — camera motion matches it exactly
+const DEATH_BLINK_MS = 500; // quick eyelid flutter right at the start, before the slow close
+const DEATH_REST_EYE_Y = 0.32; // resting camera height above whatever floor they died on
+const DEATH_TARGET_PITCH = 1.5; // ~86 degrees -- looking almost straight up
+let deathAnimActive = false, deathAnimStart = 0;
+let deathStartEyeY = 0, deathStartPitch = 0, deathTargetEyeY = 0, deathRollTarget = 0;
+
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+function easeInCubic(t) { return t * t * t; }
 
 function onLocalDeath(killerName) {
   localAlive = false;
@@ -1787,6 +2054,40 @@ function onLocalDeath(killerName) {
   centerMsg.textContent = killerName
     ? `Eliminated by ${killerName} — respawning...`
     : `You fell from the playing area — respawning...`;
+
+  deathAnimActive = true;
+  deathAnimStart = performance.now();
+  deathStartEyeY = yawObject.position.y;
+  // Drop BY (current eye height - resting height), not to a fixed world Y — so this lands
+  // correctly whether they died on ground level, a rooftop, or already crouched/prone.
+  deathTargetEyeY = deathStartEyeY - (eyeHeight - DEATH_REST_EYE_Y);
+  deathStartPitch = pitch;
+  deathRollTarget = (Math.random() < 0.5 ? -1 : 1) * (0.16 + Math.random() * 0.14); // topples slightly to one side, not a perfectly clean drop
+  setEyelidCoverage(0);
+  sfx.fall();
+}
+
+// Called every frame from animate() while deathAnimActive.
+function updateDeathAnim() {
+  const elapsed = performance.now() - deathAnimStart;
+
+  const fallEase = easeOutCubic(Math.min(1, elapsed / DEATH_FALL_MS));
+  yawObject.position.y = deathStartEyeY + (deathTargetEyeY - deathStartEyeY) * fallEase;
+  camera.rotation.x = deathStartPitch + (DEATH_TARGET_PITCH - deathStartPitch) * fallEase;
+  camera.rotation.z = deathRollTarget * fallEase;
+
+  if (elapsed < DEATH_BLINK_MS) {
+    // two quick flutter pulses (consciousness flickering) before the real close begins
+    const flutter = Math.abs(Math.sin((elapsed / DEATH_BLINK_MS) * Math.PI * 2)) * 0.16;
+    setEyelidCoverage(flutter);
+  } else {
+    const closeT = Math.min(1, (elapsed - DEATH_BLINK_MS) / (RESPAWN_MS - DEATH_BLINK_MS));
+    setEyelidCoverage(easeInCubic(closeT));
+  }
+
+  // Safety stop well past when the server's respawn should have arrived — keeps this from
+  // running forever if a respawn message is ever lost; onLocalRespawn normally stops it first.
+  if (elapsed >= RESPAWN_MS + 600) deathAnimActive = false;
 }
 
 function resetLoadout() {
@@ -1796,11 +2097,17 @@ function resetLoadout() {
 }
 
 function onLocalRespawn(pos, hp) {
+  deathAnimActive = false; // stop the death-fall update even if it hasn't hit its own end yet
   localAlive = true;
   centerMsg.hidden = true;
   eyeHeight = STAND_EYE_HEIGHT;
   setStance(false, false);
   yawObject.position.set(pos[0], eyeHeight, pos[2]);
+  // The death fall drove camera.rotation.x/z directly, bypassing the `pitch` variable (mouse
+  // look is frozen via the localAlive guard in the mousemove handler while dead) — restore the
+  // normal look angle and clear the death-fall's topple roll.
+  camera.rotation.x = pitch;
+  camera.rotation.z = 0;
   playerX = pos[0]; playerZ = pos[2];
   currentGroundY = 0; // every spawn point is ground-level
   standingPlatformIndex = -1;
@@ -1808,6 +2115,7 @@ function onLocalRespawn(pos, hp) {
   falling = false; fallVel = 0; fallDepth = 0;
   setHealth(hp);
   resetLoadout();
+  openEyelids();
 }
 
 // ---------- Pointer lock + input ----------
@@ -1846,7 +2154,10 @@ document.addEventListener('pointerlockchange', () => {
 
 let yaw = 0, pitch = 0;
 document.addEventListener('mousemove', (e) => {
-  if (!pointerLocked) return;
+  // Frozen while dead too, not just unlocked — otherwise mouse movement during the death-fall
+  // sequence would fight the scripted camera drop/tilt (updateDeathAnim), which drives
+  // camera.rotation.x/z directly.
+  if (!pointerLocked || !localAlive) return;
   yaw -= e.movementX * 0.0022;
   pitch -= e.movementY * 0.0022;
   pitch = Math.max(-1.3, Math.min(1.3, pitch));
@@ -2035,6 +2346,7 @@ function fire() {
   camera.getWorldDirection(dir);
   sendMsg({ type: 'attack', weapon: currentWeapon, origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] });
   triggerFireEffects(currentWeapon);
+  crosshairKick();
   sfx.shoot(w);
   if (w.pump) setTimeout(() => sfx.pump(), 200); // the pump-action "cha-chk" after the blast
 }
@@ -2147,7 +2459,32 @@ function collidesAt(x, z, y) {
   return false;
 }
 
+// Footstep loop — same "one swap-able looping source" pattern as the AKM's spray loop (see
+// stopAkmLoop above): running.mp3 while sprinting (shift held), walking.mp3 while moving
+// without it, silence otherwise. Both clips are real footstep recordings — untrimmed as
+// provided, so a fresh cadence-safe loop region was picked out of each by ear-free analysis
+// (ffmpeg silencedetect + an RMS envelope over the decoded PCM, not guessed): running keeps
+// its full length minus the lead-in/trail silence either side of the last real step;
+// walking's usable region turned out to be only its first ~6s — the back half of that
+// recording is a denser, differently-textured stretch that doesn't match the discrete-step
+// character of the front, so it was left out rather than looping something that would sound
+// like a different recording partway through.
+let footstepSource = null;
+let footstepMode = null; // 'run' | 'walk' | null
+function setFootstepMode(mode) {
+  if (mode === footstepMode) return;
+  if (footstepSource) { try { footstepSource.stop(); } catch { /* already finished */ } footstepSource = null; }
+  footstepMode = mode;
+  // 0.75 gain (was full volume) — your OWN footsteps deliberately sit quieter than an enemy's
+  // now that remote ones exist too (see setRemoteFootstepMode below), so the two are
+  // distinguishable by loudness alone, not just the directional/distance cues.
+  if (mode === 'run') footstepSource = playBuffer('running', { loop: true, gain: 0.75 });
+  else if (mode === 'walk') footstepSource = playBuffer('walking', { loop: true, gain: 0.75 });
+}
+
 let isMoving = false;
+let isSprinting = false; // shared with sendState() below — the server needs this to relay to
+// other players so THEY can tell your running footsteps from your walking ones (see batch 48)
 function updateMovement(dt) {
   // Once you've walked off the edge, you're committed — actually fall (drop the camera) for
   // a beat before dying, instead of dying the instant you cross the boundary line. Movement
@@ -2160,10 +2497,13 @@ function updateMovement(dt) {
       fellOffSent = true;
       sendMsg({ type: 'fellOff' });
     }
+    setFootstepMode(null); // airborne — not walking or running
     return;
   }
 
   const sprinting = !isCrouched && !isProne && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
+  isSprinting = sprinting;
+  crosshair.style.setProperty('--spread', sprinting ? '13px' : '7px');
   const speed = isProne ? PRONE_SPEED : isCrouched ? 3.0 : sprinting ? 8.5 : 5.5;
   let mx = 0, mz = 0;
   if (keys.has('KeyW')) mz -= 1;
@@ -2205,6 +2545,8 @@ function updateMovement(dt) {
     fallDepth = 0;
     isMoving = false;
   }
+
+  setFootstepMode(!isMoving ? null : sprinting ? 'run' : 'walk');
 }
 
 // ---------- Minimap: top-down obstacle layout + a triangle for the player ----------
@@ -2259,7 +2601,7 @@ function sendState(dt) {
   // pos[1] is the player's standing SURFACE height (0 on plain ground, floorY on a building's
   // upper platform) — not eye height/jump — so server-side hit detection (which builds each
   // target's hit-cylinder up from pos[1]) is correct for players on an elevated floor too.
-  sendMsg({ type: 'state', pos: [playerX, currentGroundY, playerZ], rot: [yaw, pitch], weapon: currentWeapon, crouch: isCrouched, prone: isProne, moving: isMoving });
+  sendMsg({ type: 'state', pos: [playerX, currentGroundY, playerZ], rot: [yaw, pitch], weapon: currentWeapon, crouch: isCrouched, prone: isProne, moving: isMoving, sprint: isSprinting });
 }
 
 function animateRemoteFigure(rp, dt) {
@@ -2275,7 +2617,7 @@ function animateRemoteFigure(rp, dt) {
   // instead of just squashing it — a squashed-but-still-upright box read as "standing but
   // short", not "lying down", so shots into a prone player looked unfair from the shooter's
   // side even though the server hitbox was already correctly small.
-  const targetScaleY = rp.prone ? 1 : rp.crouch ? 0.72 : 1;
+  const targetScaleY = rp.prone ? 1 : rp.crouch ? CROUCH_SCALE_Y : 1;
   rp.mesh.scale.y += (targetScaleY - rp.mesh.scale.y) * lerpT;
   const targetRotX = rp.prone ? -Math.PI / 2 : 0;
   rp.mesh.rotation.x += (targetRotX - rp.mesh.rotation.x) * lerpT;
@@ -2313,6 +2655,8 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
   if (pointerLocked && localAlive) updateMovement(dt);
+  else setFootstepMode(null); // paused/dead/menu — updateMovement won't run to catch this itself
+  if (deathAnimActive) updateDeathAnim();
   if (sceneReady) updateViewmodelKick(dt);
   if (sceneReady) updateAudioListener();
   for (const rp of remotePlayers.values()) {
@@ -2321,20 +2665,40 @@ function animate() {
     dr = Math.atan2(Math.sin(dr), Math.cos(dr));
     rp.mesh.rotation.y += dr * Math.min(1, dt * 10);
     animateRemoteFigure(rp, dt);
+    // Keep an active footstep loop's panners tracking this player's live (lerped) position —
+    // same split as the grenade tick: reposition every frame (cheap), throttle the occlusion
+    // raycast to ~5-6/sec (not free, and with several players potentially moving/running at
+    // once this adds up faster than the one-off grenade tick case did).
+    const fsEntry = remoteFootstepLoops.get(rp.id);
+    if (fsEntry && fsEntry.loop) {
+      const p = rp.mesh.position;
+      const pos = [p.x, p.y, p.z];
+      fsEntry.loop.wetPanner.positionX.value = p.x; fsEntry.loop.wetPanner.positionY.value = p.y; fsEntry.loop.wetPanner.positionZ.value = p.z;
+      const dp = dryPositionFor(pos);
+      fsEntry.loop.dryPanner.positionX.value = dp[0]; fsEntry.loop.dryPanner.positionY.value = dp[1]; fsEntry.loop.dryPanner.positionZ.value = dp[2];
+      const now = performance.now();
+      if (now - (fsEntry.occlusionCheckedAt || 0) > 180) {
+        fsEntry.occlusionCheckedAt = now;
+        applyOcclusionParams(fsEntry.loop.filter, fsEntry.loop.gainNode, fsEntry.loop.gain, isOccludedBetween(localListenerPos(), pos));
+      }
+    }
   }
   for (const gm of grenadeMeshes.values()) {
     gm.mesh.position.lerp(gm.targetPos, Math.min(1, dt * 12));
     if (gm.tick) {
       const p = gm.mesh.position;
-      gm.tick.panner.positionX.value = p.x; gm.tick.panner.positionY.value = p.y; gm.tick.panner.positionZ.value = p.z;
-      // Repositioning every frame is cheap (3 AudioParam writes); the occlusion raycast isn't
-      // free (O(wall count)), so it's throttled to ~5-6 times/sec instead of every frame —
-      // plenty responsive for a grenade rolling past a corner, not wasted on frames where
+      const pos = [p.x, p.y, p.z];
+      gm.tick.wetPanner.positionX.value = p.x; gm.tick.wetPanner.positionY.value = p.y; gm.tick.wetPanner.positionZ.value = p.z;
+      const dp = dryPositionFor(pos);
+      gm.tick.dryPanner.positionX.value = dp[0]; gm.tick.dryPanner.positionY.value = dp[1]; gm.tick.dryPanner.positionZ.value = dp[2];
+      // Repositioning every frame is cheap (a few AudioParam writes); the occlusion raycast
+      // isn't free (O(wall count)), so it's throttled to ~5-6 times/sec instead of every frame
+      // — plenty responsive for a grenade rolling past a corner, not wasted on frames where
       // nothing's changed enough to matter.
       const now = performance.now();
       if (now - (gm.tickOcclusionCheckedAt || 0) > 180) {
         gm.tickOcclusionCheckedAt = now;
-        applyOcclusionParams(gm.tick.filter, gm.tick.gainNode, gm.tick.gain, isOccludedBetween(localListenerPos(), [p.x, p.y, p.z]));
+        applyOcclusionParams(gm.tick.filter, gm.tick.gainNode, 1, isOccludedBetween(localListenerPos(), pos));
       }
     }
   }

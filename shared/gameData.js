@@ -12,9 +12,15 @@
 // of each weapon's real reload sound clip (see client.js's SOUND_FILES / gun-sounds), not a
 // guessed shooter-game value anymore, so the mechanical reload/UI-lockout window lines up with
 // the recording: AKM 3480ms, Shotgun 3792ms, Glock 2351ms (measured via mutagen, not eyeballed).
+// Shotgun's falloffStart/falloffEnd/falloffMinDamage (see handleAttack, server/index.js) keep
+// it a near-guaranteed kill in its point-blank "kill zone" (<=8 units) while tapering damage
+// down toward falloffMinDamage out at its max range (28) — without this, its flat 60 damage
+// combined with the headshot multiplier (round(60*2.5)=150, well past MAX_HEALTH) made it a
+// guaranteed one-shot kill at ANY distance inside its range, i.e. it played like a sniper
+// rather than a shotgun. No other weapon defines these fields, so they're a no-op elsewhere.
 export const WEAPONS = [
   { id: 0, name: 'AKM',     icon: '🔫', image: 'akm.png',    ammoImage: 'ammo_762.png', type: 'ranged', damage: 16, fireInterval: 110, range: 70,  auto: true,  pump: false, magSize: 30, reserveMax: 180, pickupAmount: 120, caliber: '7.62mm', reloadTime: 3480 },
-  { id: 1, name: 'Shotgun', icon: '💥', image: 'shotgun.png', ammoImage: 'ammo_12ga.png', type: 'ranged', damage: 60, fireInterval: 850, range: 28,  auto: false, pump: true,  magSize: 6,  reserveMax: 30,  pickupAmount: 18,  caliber: '12ga', reloadTime: 3792 },
+  { id: 1, name: 'Shotgun', icon: '💥', image: 'shotgun.png', ammoImage: 'ammo_12ga.png', type: 'ranged', damage: 60, fireInterval: 850, range: 28,  auto: false, pump: true,  magSize: 6,  reserveMax: 30,  pickupAmount: 18,  caliber: '12ga', reloadTime: 3792, falloffStart: 8, falloffEnd: 28, falloffMinDamage: 16 },
   { id: 2, name: 'Glock',   icon: '🔫', image: 'glock.png',  ammoImage: 'ammo_9mm.png', type: 'ranged', damage: 14, fireInterval: 230, range: 50,  auto: false, pump: false, magSize: 12, reserveMax: 72,  pickupAmount: 60,  caliber: '9mm', reloadTime: 2351 },
   { id: 3, name: 'Combat Knife', icon: '🔪', image: null,    ammoImage: null,          type: 'melee',  damage: 55, fireInterval: 450, range: 3.2, auto: false, pump: false, magSize: null, reserveMax: null, pickupAmount: 0, caliber: null, reloadTime: null },
 ];
@@ -26,9 +32,20 @@ export const MAX_PLAYERS_PER_ROOM = 10;
 export const STAND_EYE_HEIGHT = 1.7;
 export const CROUCH_EYE_HEIGHT = 1.15;
 export const PRONE_EYE_HEIGHT = 0.45;
-export const STAND_HEAD_OFFSET = 1.5;
-export const CROUCH_HEAD_OFFSET = 1.0;
+// Still used for prone's overall hit-cylinder height (torso/legs coverage) — see HEAD_CENTER_Y
+// below for the actual head geometry, which prone no longer derives from this offset.
 export const PRONE_HEAD_OFFSET = 0.35;
+// The head hitbox used to be independently-tuned offsets (STAND_HEAD_OFFSET=1.5,
+// CROUCH_HEAD_OFFSET=1.0) that had drifted away from what the client actually renders — the
+// visual head is a 0.32 box centered at HEAD_CENTER_Y, so its real top is HEAD_CENTER_Y+HEAD_HALF
+// = 1.86 while standing, but the old server yMax capped at 1.7: the top ~half of the visible
+// head was a total whiff, not even a body hit (same mismatch recurred for crouch). These three
+// constants are the single source of truth for both the client's rendered head geometry
+// (buildCharacterFigure/animateRemoteFigure, client.js) and the server's hit-cylinder/headshot
+// zone (handleAttack, server/index.js), so the two can't independently drift apart again.
+export const HEAD_CENTER_Y = 1.7;   // head-box center height when standing (matches STAND_EYE_HEIGHT)
+export const HEAD_HALF = 0.16;      // half-extent of the head's 0.32-unit box
+export const CROUCH_SCALE_Y = 0.72; // Y-scale applied to the whole figure while crouched
 export const PLAYER_RADIUS = 0.4;
 export const PRONE_SPEED = 1.4;
 
@@ -56,10 +73,9 @@ export const GRENADE_THROW_SPEED = 16;
 export const GRENADE_BLAST_RADIUS = 8;
 export const GRENADE_LETHAL_RADIUS = 3; // inside this, a grenade is a guaranteed one-shot kill
 export const GRENADE_MAX_DAMAGE = 95;
-// Ranged hits landing in the top slice of a target's hit-cylinder (head height, already
+// Ranged hits landing inside a target's actual head band (see HEAD_CENTER_Y/HEAD_HALF above,
 // stance-aware) do extra damage; melee/grenade ignore this. Body/arms/legs stay uniform.
 export const HEADSHOT_MULTIPLIER = 2.5;
-export const HEADSHOT_ZONE_FRAC = 0.82; // top 18% of the hit-cylinder height counts as head
 export const GRENADE_RADIUS = 0.15; // ground-contact/physics size of the thrown grenade
 export const GRENADE_START_COUNT = 3; // carried grenades, refilled on respawn
 export const GRENADE_MAX_CARRY = 6;
@@ -362,14 +378,14 @@ function makeMansionStair({ climbLow, climbHigh, outerZ, stairWidth, toY, color 
 // requested line, close enough together that consecutive blocks overlap (no seams a bullet or
 // a player could slip through) — reads as a blocky diagonal barrier, which actually matches a
 // brick-built wall's own chunky material better than a single smooth rotated slab would.
-// `coverH` is deliberately short — tall enough that a CROUCHED player's hit-cylinder
-// (CROUCH_HEAD_OFFSET + the 0.2 hitbox margin server-side, see handleAttack) is fully behind
-// it, but well under a standing player's, so standing behind it still exposes you (a real
-// height tradeoff, not just a prop). One block along the chain (`gunHoleIndex`) is built as a
-// low block plus a separate cap instead of one solid block, leaving a real horizontal gap
-// between them at roughly crouch eye height — an actual hole a crouched player can fire and
-// see through, not just a shorter section of wall.
-function makeDiagonalCoverWall({ x1, z1, x2, z2, blockSize = 1.4, spacing = 1.0, coverH = 1.3, gunHoleIndex, color }) {
+// `coverH` is deliberately short — tall enough that a CROUCHED player's hit-cylinder (the real
+// visual head-top while crouched: (HEAD_CENTER_Y+HEAD_HALF)*CROUCH_SCALE_Y ~= 1.34, see
+// handleAttack) is fully behind it, but well under a standing player's (~1.86), so standing
+// behind it still exposes you (a real height tradeoff, not just a prop). One block along the
+// chain (`gunHoleIndex`) is built as a low block plus a separate cap instead of one solid
+// block, leaving a real horizontal gap between them at roughly crouch eye height — an actual
+// hole a crouched player can fire and see through, not just a shorter section of wall.
+function makeDiagonalCoverWall({ x1, z1, x2, z2, blockSize = 1.4, spacing = 1.0, coverH = 1.45, gunHoleIndex, color }) {
   const dx = x2 - x1, dz = z2 - z1;
   const len = Math.hypot(dx, dz);
   const steps = Math.max(2, Math.round(len / spacing) + 1);

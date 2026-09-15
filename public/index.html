@@ -45,7 +45,19 @@
   .divider { border-top: 1px solid #332f24; margin: 18px 0; }
 
   #hud { position: fixed; inset: 0; pointer-events: none; }
-  #crosshair { position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; margin: -3px; border-radius: 50%; background: rgba(232,226,208,0.9); box-shadow: 0 0 0 1px rgba(0,0,0,0.5); }
+  /* A broken cross (4 tick marks, no connecting ring) + center dot. --spread is the base
+     gap from center (widens while sprinting); --extra is a short outward kick added on top
+     (fire bloom), both consumed via calc() in each tick's transform so a plain CSS transition
+     on `transform` animates it smoothly whenever either variable changes. */
+  #crosshair { position: absolute; top: 50%; left: 50%; width: 0; height: 0; --spread: 7px; --extra: 0px; --ch-color: rgba(232,226,208,0.9); }
+  #crosshair .ch-dot { position: absolute; top: 0; left: 0; width: 3px; height: 3px; transform: translate(-50%, -50%); border-radius: 50%; background: var(--ch-color); box-shadow: 0 0 0 1px rgba(0,0,0,0.5); }
+  #crosshair .ch-tick { position: absolute; top: 0; left: 0; background: var(--ch-color); box-shadow: 0 0 0 1px rgba(0,0,0,0.5); transition: transform 140ms ease-out; }
+  #crosshair .ch-top, #crosshair .ch-bottom { width: 2px; height: 7px; margin-left: -1px; }
+  #crosshair .ch-left, #crosshair .ch-right { width: 7px; height: 2px; margin-top: -1px; }
+  #crosshair .ch-top    { transform: translate(-50%, calc(-50% - var(--spread) - var(--extra))); }
+  #crosshair .ch-bottom { transform: translate(-50%, calc(-50% + var(--spread) + var(--extra))); }
+  #crosshair .ch-left   { transform: translate(calc(-50% - var(--spread) - var(--extra)), -50%); }
+  #crosshair .ch-right  { transform: translate(calc(-50% + var(--spread) + var(--extra)), -50%); }
   #healthWrap { position: absolute; left: 20px; bottom: 20px; width: 220px; }
   #healthBar { height: 18px; background: #1c1a15; border: 1px solid #4a4232; border-radius: 3px; overflow: hidden; }
   #healthFill { height: 100%; width: 100%; background: linear-gradient(90deg,#7a2b2b,#c94b4b); transition: width 0.15s; }
@@ -86,10 +98,89 @@
   .ctlTable td:last-child { color: #948a70; }
 
   #scoreboard { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10,9,7,0.7); }
-  #scoreboard table, #matchEndScreen table { border-collapse: collapse; width: 480px; max-width: 92vw; background: rgba(20,18,14,0.95); border: 1px solid #4a4232; }
+  /* max-width was a flat 92vw — fine for #scoreboard (sits directly in a full-screen, unpadded
+     flex container, so 92vw of the viewport is also ~92vw of its actual container), but
+     #matchEndScreen's copy sits inside a 480px .panel that ALSO has 28px of padding on each
+     side (424px really available there) — on any normal-sized window 92vw is bigger than
+     424px, so the cap never actually engaged and the table overflowed past the panel's own
+     edge. min(92vw,100%) keeps the viewport safety net AND respects whichever container the
+     table's actually placed in — same rendered size as before for the scoreboard, genuinely
+     capped for the match-end panel. */
+  #scoreboard table, #matchEndScreen table { border-collapse: collapse; width: 480px; max-width: min(92vw, 100%); background: rgba(20,18,14,0.95); border: 1px solid #4a4232; }
   #scoreboard th, #scoreboard td, #matchEndScreen th, #matchEndScreen td { padding: 8px 14px; text-align: left; font-size: 13px; border-bottom: 1px solid #332f24; }
   #scoreboard th, #matchEndScreen th { color: #948a70; font-weight: 600; }
   #scoreboard td.name, #matchEndScreen td.name { color: #e8e2d0; }
+
+  /* Game-over: a big red title that slams in oversized and settles with a bounce, plus real
+     blood-splatter photos (blood_splat1/2.png, background-removed and recolored to a clean
+     red duotone — see CLAUDE.md batch 42 for the full extraction story). `overflow: visible`
+     on the panel is required — the splats deliberately bleed past the panel's own border, not
+     contained inside it, which is what makes them read as "stains on the board" rather than a
+     decoration printed within it.
+     These are plain <img> tags now, NOT background-image div crops — the crop approach (a
+     `background-size`/`background-position` "zoom into one corner of the sheet") rendered as
+     a visible hard-edged rectangle in testing instead of the organic splatter shape, and
+     without a real browser to debug that percentage math against, showing the WHOLE already-
+     good splatter photo (just scaled/rotated/flipped per instance for variety) is the
+     bulletproof choice — an <img> respects its own PNG alpha directly, no cropping math to get
+     wrong. Also added: a bigger, low-opacity splat behind/between the GAME OVER letters
+     themselves (z-index under the title text), and animated drip trails hanging off several
+     splats for a genuine dripping motion, not just a static stain. */
+  #matchEndScreen .panel { position: relative; overflow: visible; }
+  #gameOverTitle { position: relative; z-index: 2;
+    font-size: 58px; font-weight: 900; letter-spacing: 6px; margin: 0 0 6px;
+    color: #c81414; -webkit-text-stroke: 1px #1a0000;
+    text-shadow: 0 0 24px rgba(200,20,20,0.55), 3px 3px 0 #3a0000, 0 8px 18px rgba(0,0,0,0.7);
+    animation: gameOverDrop 1.1s cubic-bezier(.25,.85,.3,1.25) both;
+  }
+  @keyframes gameOverDrop {
+    0%   { transform: scale(4.2); opacity: 0; }
+    55%  { transform: scale(0.92); opacity: 1; }
+    75%  { transform: scale(1.06); }
+    100% { transform: scale(1); }
+  }
+  .bloodStain { position: absolute; pointer-events: none; opacity: 0; z-index: 0; animation: bloodSplat 0.55s ease-out both; }
+  @keyframes bloodSplat {
+    0%   { opacity: 0; transform: scale(0.35) rotate(var(--rot, 0deg)) scaleX(var(--flip, 1)); }
+    60%  { opacity: var(--peakop, 0.95); }
+    100% { opacity: var(--op, 0.92); transform: scale(1) rotate(var(--rot, 0deg)) scaleX(var(--flip, 1)); }
+  }
+  /* Down to just the one corner splat now — the full 8-corner set (see CLAUDE.md batch 43)
+     read as too busy once the handprint was added too; this is the deliberately sparser look. */
+  .bloodStain.s1 { width: 130px; top: -36px; left: -30px; --rot: -8deg; animation-delay: 0.55s; }
+  /* Real bloody handprint (blood_handprint.png — background-removed + the same red duotone
+     recolor as the two splatter photos, see CLAUDE.md batch 44) sitting directly BEHIND the
+     "GAME OVER" letters — z-index 1 vs the title's z-index 2, so the letters render on top of
+     it and it genuinely reads as gripping/between the glyphs, not just floating nearby.
+     mix-blend-mode:screen, not `overlay` — this panel's background is very dark
+     (rgba(20,18,14,...), well under the 50% midpoint overlay's formula branches on), so literal
+     Photoshop-style `overlay` blending would darken the handprint down to near-invisible here;
+     `screen` is the blend mode that actually stays visible against a near-black backdrop while
+     still being a real compositing blend (not flat opacity) the way a photo editor's blend
+     options work. Sized/positioned to stay within the title's own band — the drip tips reach
+     just slightly into the subtitle's space by design (a deliberate "dripping past the title"
+     touch), but never far enough to reach the scoreboard table below it. */
+  .gameOverHandprint {
+    position: absolute; pointer-events: none; opacity: 0; z-index: 1;
+    top: 12px; left: calc(50% - 70px); width: 140px;
+    mix-blend-mode: screen; animation: handSlam 1.0s ease-out both; animation-delay: 0.3s;
+  }
+  @keyframes handSlam {
+    0%   { opacity: 0; transform: scale(1.7) rotate(-4deg); }
+    55%  { opacity: 0.85; }
+    100% { opacity: 0.72; transform: scale(1) rotate(-4deg); }
+  }
+
+  /* Every button in the UI gets 2 small random blood decals (see decorateButtonsWithBlood() in
+     client.js — picks the image, size, corner, and rotation per decal so no two buttons look
+     the same). Real <img> tags, not a background-image crop — the crop approach rendered as a
+     visible hard-edged rectangle instead of the organic splatter shape when tested on the
+     match-end panel (same fix applied there, see .bloodStain above); an <img> just shows the
+     whole already-good photo, scaled/rotated, no cropping math to get wrong.
+     mix-blend-mode:multiply darkens whatever's already there instead of sitting on top as a
+     flat sticker, which is what makes it read as a stain IN the button's own material rather
+     than a decal glued over it. */
+  .btnBloodDecal { position: absolute; pointer-events: none; opacity: 0.65; mix-blend-mode: multiply; z-index: 2; }
   #matchTimer { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); font-size: 20px; font-weight: 700; color: #e8c65a; text-shadow: 0 2px 6px #000; font-variant-numeric: tabular-nums; }
   [hidden] { display: none !important; }
 </style>
@@ -141,8 +232,8 @@
         <option value="ruins">Map: Ruins — dusk, broken hills</option>
       </select>
       <div class="row" style="margin-top:10px;align-items:center;">
-        <span class="sub" style="margin:0;white-space:nowrap;">Match length (HH:MM)</span>
-        <input id="matchDurationInput" type="time" value="00:10" style="flex:1;padding:10px 12px;background:#1c1a15;border:1px solid #4a4232;color:#e8e2d0;border-radius:4px;font-size:14px;" />
+        <span class="sub" style="margin:0;white-space:nowrap;">Match length (HH:MM:SS)</span>
+        <input id="matchDurationInput" type="time" step="1" value="00:10:00" style="flex:1;padding:10px 12px;background:#1c1a15;border:1px solid #4a4232;color:#e8e2d0;border-radius:4px;font-size:14px;" />
       </div>
       <div class="row" style="margin-top:10px;align-items:center;">
         <span class="sub" style="margin:0;flex:1;">Meme Mode <span style="opacity:0.7;">(posters on the walls/mansion)</span></span>
@@ -180,7 +271,13 @@
 <div id="gameContainer" hidden></div>
 
 <div id="hud" hidden>
-  <div id="crosshair"></div>
+  <div id="crosshair">
+    <div class="ch-dot"></div>
+    <div class="ch-tick ch-top"></div>
+    <div class="ch-tick ch-bottom"></div>
+    <div class="ch-tick ch-left"></div>
+    <div class="ch-tick ch-right"></div>
+  </div>
   <div id="roomTag"></div>
   <div id="matchTimer" hidden></div>
   <canvas id="minimap" width="150" height="150"></canvas>
@@ -216,7 +313,9 @@
 
 <div id="matchEndScreen" class="screen" hidden style="background:rgba(10,9,7,0.85);">
   <div class="panel" style="width:480px;text-align:center;">
-    <h1 style="font-size:22px;">Match Over</h1>
+    <img class="gameOverHandprint" src="/images/blood_handprint.png" alt="" />
+    <img class="bloodStain s1" src="/images/blood_splat1.png" alt="" />
+    <h1 id="gameOverTitle">GAME OVER</h1>
     <p class="sub">time's up — final standings</p>
     <table>
       <thead><tr><th>#</th><th>Player</th><th>Kills</th><th>Deaths</th></tr></thead>

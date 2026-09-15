@@ -1561,3 +1561,657 @@ Verified before deploying: syntax-checked, grep-confirmed every piece (the renam
 on the remote, pm2 restarted clean. This completes the "gunfire, explosions, and now grenade
 ticking all use real distance falloff + directional panning + wall occlusion" system requested
 across batches 37-38 — ready for the user's own headphone test.
+
+## Batch 39 (2026-09-15): DONE — wet/dry blend to soften the too-extreme HRTF panning
+
+User feedback after testing: hard-left/right sounds were near-silent in the off ear — too
+strict a separation, wanted a normalized floor (e.g. 100% near ear, ~30-40% off ear).
+
+**Root cause (explained to the user before touching code):** every positional sound routed
+through a single `PannerNode` with `panningModel:'HRTF'` and nothing else. HRTF is a real
+binaural simulation (head-shadow + ear-shape filtering, not just amplitude panning) — for a
+source directly to one side, near-total separation is what real ears actually do, so this
+wasn't a bug, it's HRTF being faithful. But that's also why real shooters (including BGMI)
+don't ship raw HRTF — they blend it with an always-centered copy for comfort.
+
+**Fix — a proper wet/dry spatial blend, not a panner-parameter tweak** (`client.js`):
+- `SPATIAL_WET = 0.68` / `SPATIAL_DRY = 0.34` — every positional sound now splits into two
+  paths from the SAME `BufferSource` (fanned out via two `.connect()` calls, no duplicate
+  source needed): a full-HRTF "wet" path at the real position, and a "dry" path panned via
+  `equalpower` (chosen specifically because its centered case is a guaranteed, predictable
+  50/50 split — HRTF's own frontal response isn't necessarily symmetric depending on the
+  browser's HRTF dataset).
+- The dry path's PannerNode is positioned along the LISTENER's own forward vector at the SAME
+  distance as the real source (`dryPositionFor()`) — this reuses the browser's own correct
+  'inverse' distance-falloff math for free (distance attenuation depends only on distance, not
+  angle) instead of hand-rolling that formula a second time, while its angle reads as "dead
+  ahead" so it lands centered.
+- Both paths sum into one shared lowpass filter + gain node before the destination (WebAudio
+  sums multiple connections into one node automatically) — occlusion is applied ONCE, post-mix,
+  since a wall muffles the whole arriving sound, not just one of its two paths.
+- The two panners need to move TOGETHER whenever a sound's source moves — `updatePositionalTarget`
+  (used by the AKM's remote loop) and the grenade-tick per-frame tracking loop in `animate()`
+  both now reposition wetPanner + recompute/reposition dryPanner in the same call.
+
+**Verified before deploying, math not vibes:** computed the theoretical off-ear floor by hand
+(equalpower center gives each ear `cos(π/4)≈0.707` of the dry contribution; conservative
+worst-case HRTF assumes zero far-ear bleed) — `0.68·0 + 0.34·0.707` vs `0.68·1 + 0.34·0.707`
+comes out to a ~26% floor even in that worst case; real HRTF's actual low-frequency head-
+diffraction bleed is never quite zero, so the real, testable result should land at or above
+that, in the 30-40% range the user asked for. Can't run real HRTF convolution outside a
+browser to verify the exact number, so this is presented as reasoned/bounded, not guaranteed —
+`SPATIAL_WET`/`SPATIAL_DRY` are named, isolated constants specifically so it's a one-line nudge
+if the user's own test says it needs adjusting either direction.
+
+Syntax-checked, deployed, grep-verified every renamed/new piece (`wetPanner`, `dryPanner`,
+`dryPositionFor`, the two constants) is live on the remote, pm2 restarted clean. Not
+browser-tested per standing instruction.
+
+## Batch 40 (2026-09-15): DONE — redesigned the match-end (time-runs-out) screen
+
+User asked for a big red "GAME OVER" that shrinks onto the screen, blood stains on the panel,
+"sexy" animation, and audio from an existing `game-over.mp3` found in the repo (2.112s,
+measured via mutagen).
+
+Scope: only the timer-expiry match-end screen (`#matchEndScreen`), not per-death messaging —
+matches "when the time runs out" specifically.
+
+**No blood-stain image asset exists** (checked first) — built entirely from CSS: 4
+`.bloodStain` blobs (radial-gradient fill, organic per-corner `border-radius` instead of a
+perfect circle) plus 2 `.bloodDrip` elements (a gradient fading to transparent, animated height
+growth for a "dripping down" look), positioned at the panel's corners with deliberately
+negative offsets so they bleed PAST the panel's border rather than sitting inside it — that's
+what reads as "stains on the board" instead of a decoration printed on it. Requires
+`overflow: visible` on `#matchEndScreen .panel` specifically (the shared `.panel` class doesn't
+have it) so the splats aren't clipped.
+
+**"GAME OVER" entrance**: `#gameOverTitle` replaces the old plain "Match Over" `<h1>` — deep
+red with a dark stroke + layered text-shadow (glow + drop-shadow, not a flat color), animated
+via `@keyframes gameOverDrop`: starts at `scale(4.2)` and transparent, shrinks past its resting
+size to `scale(0.92)`, overshoots slightly to `1.06`, settles at `1` — a real "big letters
+shrink onto screen" motion with a bounce on the landing, not a linear fade. Blood splats are
+staggered in with their own `animation-delay` (0.55s-0.9s) so they visibly follow the title's
+landing rather than all popping in at once — a small choreography detail, not required but
+what makes an entrance read as designed instead of just "several things appearing."
+
+**Why no re-trigger logic was needed:** `matchEndScreen` goes from `hidden` (display:none, so
+its CSS animations don't run at all while hidden) to visible exactly once per match — "Quit to
+Menu" is already a full `location.reload()` — so unhiding it plays the animation fresh with no
+extra JS needed to reset/restart it.
+
+**Audio**: `game-over.mp3` added to the existing `SOUND_FILES`/buffer-cache system (batch 35),
+played via the plain flat `playBuffer('gameOver')` in `onMatchEnded()` — not positional, this
+is a UI/meta event with no world position, same treatment as pickup/hit-marker sounds. Also
+added `stopAkmLoop()` to `onMatchEnded()` (it was already called on mouseup/empty-mag/weapon-
+switch, but not here) — a stray AKM spray loop still playing under the dramatic game-over sound
+would have undercut the moment the user specifically asked to land well.
+
+Verified before deploying: HTML sanity-checked (exactly one `#gameOverTitle`, 4 `.bloodStain` +
+2 `.bloodDrip` elements, balanced div tags — 43 opens/43 closes). Syntax-checked `client.js`,
+uploaded `game-over.mp3` and confirmed it's reachable (curl 200), grep-verified every new piece
+(the keyframes, the blood classes, `gameOver:` in `SOUND_FILES`, the `playBuffer`/`stopAkmLoop`
+calls) is live on the remote, pm2 restarted clean. Not browser-tested per standing instruction
+— the animation timing/feel and exact blood-splat placement are exactly the kind of thing that
+benefits from an actual look, flagging clearly rather than claiming confidence there.
+
+## Batch 41 (2026-09-15): DONE — seconds field on the create-room match-length input
+
+User asked for a way to enter seconds, not just minutes, for match length.
+
+Real fix, not just a label change — the old `<input type="time">` had no `step` attribute, so
+browsers default it to minute granularity (`.value` reports "HH:MM", no seconds field shows in
+the native picker at all). Added `step="1"` (`index.html`) — this alone makes the browser show
+a seconds sub-field, AND switches the input's own `.value` format to "HH:MM:SS" once it does.
+
+That format change meant the parsing/protocol had to follow, not just the input tag:
+- `client.js`: `parseDurationMin()` → `parseDurationSec()`, regex extended with an optional
+  `(?::(\d{2}))?` seconds group (kept optional so a blank/legacy "HH:MM" value — or a browser
+  that reports one when seconds are exactly :00 — still parses correctly), returns total
+  SECONDS instead of minutes.
+- `createRoom` message field renamed `durationMin` → `durationSec` end-to-end (client send,
+  server receive) — no backward-compat shim needed, both sides deploy together.
+- `server/index.js`: was clamping/multiplying in whole minutes (`durationMin * 60000`); now
+  clamps 0-10800 seconds (same 180-minute ceiling, just expressed in the new unit) and uses
+  `durationSec * 1000` directly, so a 37-second match is genuinely 37 seconds, not rounded down
+  to 0 minutes (which is what the old code would have done to any sub-minute value — before
+  this, sub-minute precision wasn't just missing from the UI, it was impossible to actually
+  configure at all).
+
+Also updated the visible label from "Match length (HH:MM)" to "Match length (HH:MM:SS)" so the
+picker's own new field isn't unexplained.
+
+**Verified live, not just unit-tested:** a standalone `ws` client test created a real room with
+`durationSec: 37` (deliberately not a round minute, to actually prove sub-minute precision
+survives the full round trip) and confirmed the server's `joined` response reported
+`matchEndsAt` within 27ms of exactly 37000ms out — genuine second-level precision, not silently
+rounded. Also unit-tested `parseDurationSec` against 7 cases (whole minutes, sub-minute
+seconds, the legacy no-seconds format, zero/no-limit, empty string) before deploying. Syntax-
+checked both files, pm2 restarted clean (twice — once after deploying, once more to clear the
+test room). Not browser-tested per standing instruction — the native time-picker's actual
+seconds-field appearance/usability is worth a look.
+
+## Batch 42 (2026-09-15): DONE — real blood-splatter photos replacing the CSS "balloons", stains on every button, table overflow fixed
+
+Three fixes from one round of feedback on batch 40's game-over screen.
+
+**1. Table overflowing the panel.** `#scoreboard table, #matchEndScreen table` had a flat
+`width:480px` — fine for `#scoreboard` (sits directly in an unpadded full-screen flex
+container) but `#matchEndScreen`'s copy sits inside a 480px `.panel` that ALSO has 28px of
+padding per side (424px actually available), so the table was always going to spill past the
+panel's edge. Changed to `max-width: min(92vw, 100%)` — keeps the scoreboard's existing size
+unchanged while letting the match-end copy actually shrink to fit its real container.
+
+**2. Blood stains looked like "balloons".** They were hand-built CSS radial-gradient blobs —
+smooth and round, nothing like organic splatter. User provided two real reference photos;
+processing them was more involved than the usual bg-removal pass:
+- Both were flattened onto a baked-in gray/white checkerboard (not real alpha — `PIL` reported
+  mode `RGB`, no transparency at all despite looking transparent in preview).
+- A first pass (saturation-based alpha, even with un-blending the checker color out of the
+  edges) left a persistent light gray/white "halo" ring around every droplet when tested
+  against a dark background — traced this to the source art itself having a glossy white
+  highlight rim baked into each drop (a real feature of the artwork, not an extraction
+  artifact), which reads fine against clip-art white backgrounds but looks like a foreign gray
+  smudge against this game's dark UI.
+- Fixed with a duotone remap: every masked pixel's ORIGINAL color is discarded and replaced by
+  a red-family gradient (dark dried-blood red → mid red → light pink-red) driven purely by that
+  pixel's own luminance — so the "shine" is preserved as a lighter red highlight instead of a
+  gray one. Verified by compositing onto black, a red button color, a green button color, and
+  the gold `.btn-primary` color before trusting it — clean on all four, no halo anywhere.
+- The match-end panel's 4 corner decorations (`.bloodStain.s1-s4`) now use real cropped
+  fragments of these two photos (different `background-position`/size/rotation per corner, not
+  just 4 copies of the same shot) instead of gradient blobs; the separate synthetic `.bloodDrip`
+  elements were removed — the real photos already have drip detail baked in, no need to fake it
+  twice.
+
+**3. Stains on ALL buttons, not just the game-over screen.** New `decorateButtonsWithBlood()`
+(client.js), runs once at load over every `<button>` in the static HTML (there's no dynamic
+button creation in this UI, so a one-time pass is complete — confirmed by checking). For each
+button: picks one of the two source images at random, a random crop window into it
+(`background-position`, since these are big single-sheet splatter photos, not individual
+pre-cut decals — a random crop samples a different-looking fragment each play), random size
+(20-34px), random corner, random rotation — genuinely different-looking per button, using both
+images. `mix-blend-mode: multiply` so it reads as a stain darkening the button's own material
+rather than a sticker sitting on top of it, `pointer-events:none` so it never blocks clicks.
+
+Verified before deploying: HTML div-balance check (41/41), syntax-checked `client.js`,
+confirmed both processed PNGs reachable (curl 200 each), grep-verified the new function and
+CSS class are live on the remote, pm2 restarted clean. Not browser-tested per standing
+instruction — the actual random placement/crop variety across the full button set is worth a
+look.
+
+## Batch 43 (2026-09-15): DONE — fixed blood stains rendering as hard-edged rectangles, real drips, denser coverage
+
+User screenshot showed batch 42's blood stains rendering as visible rectangular tiles, not
+organic splatter shapes — a real bug, not a style complaint.
+
+**Root cause:** the previous approach used `background-image` + `background-size` (a zoom
+percentage) + `background-position` (a crop offset) on plain `<div>`s, meant to sample a
+different-looking fragment of each large splatter sheet per stain. Downloaded and re-verified
+the actual deployed PNGs first (confirmed proper RGBA alpha, clean duotone recolor, no
+checkerboard) — the FILES were correct, so the bug was in the CSS crop math, which without a
+real browser available to debug interactively wasn't worth trying to patch blind a second time.
+
+**Fix: dropped the crop technique entirely.** Every stain (`.bloodStain` on the match-end
+panel, `.btnBloodDecal` on buttons) is now a plain `<img>` element showing the WHOLE already-
+good splatter photo — scaled via `width` (height auto, aspect ratio preserved, no distortion),
+rotated and horizontally flipped via CSS `transform` for variety. An `<img>` respects its own
+PNG alpha directly with zero cropping math to get wrong — this removes the entire class of bug
+that produced the rectangles, rather than re-tuning percentages hoping to get lucky.
+
+**Also addressed in the same pass, per the user's follow-up feedback:**
+- **Denser coverage**: match-end panel went from 4 corner stains to 8 (corners + all 4 edge
+  midpoints) plus a large low-opacity (`--op:0.28`) splat centered BEHIND the "GAME OVER" title
+  text itself (`z-index` under the title, over the panel) — addressing the earlier "add it
+  between the letters" ask that hadn't been done yet when the rendering bug took priority.
+  Buttons went from 1 decal to 2 per button, corners chosen without replacement so the pair
+  doesn't overlap.
+- **Real dripping motion, not just a static stain**: brought back animated `.bloodDrip`
+  elements (4 now, up from the 2 removed in batch 42) — a thin gradient bar that grows
+  downward via `@keyframes bloodDripFall`, layered over a couple of the splats so it reads as
+  blood actively running off them.
+
+Verified before deploying: HTML div-balance check (41/41) plus a count of the new self-closed
+`<img>` tags (9, matching the 9 `.bloodStain` instances — title + 8). Syntax-checked
+`client.js`. Grep-confirmed the new `<img>`-based markup, the `createElement('img')` swap in
+`decorateButtonsWithBlood()`, and the 4th drip element are all live on the remote. pm2 restarted
+clean. Not browser-tested per standing instruction — given the LAST deploy's bug only became
+visible via an actual screenshot, this one specifically needs a real look before trusting it
+further; flagging that explicitly rather than claiming confidence this round.
+
+**Still pending**: the user also sent a bloody handprint reference photo to place between the
+GAME OVER letters specifically (a different, more literal element than the low-opacity splat
+added here) — same as the two splatter photos, it arrived as inline chat content with no file
+on disk; asked the user to save it to `/home/chicmic/a/games/` before that part can be done.
+
+## Batch 44 (2026-09-15): DONE — real bloody handprint between the GAME OVER letters, via blend mode
+
+User's third reference image, a bloody handprint with drip trails on a white background
+(`blood-dripping.png`, saved to `/home/chicmic/a/games/`) — wanted it placed behind the "GAME
+OVER" title specifically, background removed, composited via a real blend mode ("overlay like
+blend options in photo editor apps"), not flat opacity.
+
+**Processing**: same duotone-recolor pipeline validated in batch 42 (saturation-based alpha
+mask + luminance-driven red gradient recolor, dark→mid→light) — this source had a plain white
+background (not a checkerboard like the first two), so extraction was more straightforward,
+but the same recoloring step still matters: it's what keeps the result clean rather than
+leaving a gray/white halo from the source photo's own shading. Verified via the same dark/red
+composite test as the other two before trusting it — clean silhouette, visible finger/palm
+texture and drip trails, no watermark bleed-through from the stock-photo watermark visible in
+the original.
+
+**Blend mode — used `screen`, not literal `overlay`, and said so up front rather than silently
+substituting.** Worked out why before touching CSS: `overlay`'s blend formula darkens hard
+against any base color under 50% lightness, and this panel's background
+(`rgba(20,18,14,0.9)`) is deep in that range — genuine Photoshop-style `overlay` would have
+rendered the handprint almost invisible here, defeating the point. `mix-blend-mode: screen`
+is the blend mode that actually stays visible against a near-black backdrop while still being
+a real compositing blend rather than flat opacity — same spirit as what was asked
+("blend options" plural, not a demand for that exact one), just the member of that family that
+actually works on this background.
+
+**Placement**: `.gameOverHandprint`, `z-index:1` vs the title's `z-index:2` — the letters
+render on top of it, which is what makes it read as gripping/between the glyphs rather than a
+decoration floating nearby. Sized/positioned to stay within the title's own vertical band; the
+drip tips reach slightly into the subtitle's space by design (a deliberate "dripping past the
+title" touch) but don't reach the scoreboard table — and even where they do overlap the
+subtitle, `screen` blend naturally minimizes the darkest drip-tip pixels' visual weight against
+the dark backdrop, so legibility isn't meaningfully affected.
+
+Verified before deploying: div-balance check (41/41 unchanged), single clean reference to the
+new element/image (grep count 2 — the CSS rule + the one `<img>`), confirmed the uploaded PNG
+is reachable (curl 200), pm2 restarted clean. Not browser-tested per standing instruction — the
+actual visual weight/legibility trade-off around the subtitle overlap is worth a real look.
+
+## Batch 45 (2026-09-15): DONE — decluttered the game-over screen down to the handprint + one corner stain
+
+Confirmed by the user's own screenshot: batch 43's `<img>`-based fix worked (real organic
+splatter shapes, no more rectangles) and the handprint from batch 44 was reading correctly
+behind the title — but 8 corner/edge splats plus 4 drips plus the handprint together was too
+busy. User asked to drop everything except the handprint and the top-left stain.
+
+Removed: `.bloodStain.s2` through `.s8` (7 of the 8 corner/edge splats) and all 4 `.bloodDrip`
+elements — the drips were positioned relative to specific now-removed splats (mostly s2/s3),
+so keeping them orphaned without their source stain would have looked disconnected; dropped
+all of them rather than leaving mismatched leftovers. Kept: `.gameOverHandprint` (the hero
+element behind the title) and `.bloodStain.s1` (the one surviving corner accent, top-left).
+
+Verified before deploying: div-balance check (37/37, down from 41 — exactly the 4 removed
+`.bloodDrip` divs), grep-confirmed exactly one remaining `.bloodStain` element (`s1`) and no
+stray references to the removed classes anywhere in `client.js` (it never touched these
+elements directly, so nothing there needed changing). pm2 restarted clean. Not browser-tested
+per standing instruction, though this round is a pure subtraction from an already-verified-
+working state, so risk here is low.
+
+## Batch 46 (2026-09-15): DONE — background music, louder explosion, grenade ear-ring, real knife sound, real footsteps
+
+Five separate asks in one batch: `backround.mp3` (background music, 2x gain), explosion volume
+bumped again (2x wasn't enough), `ring.mp3` (a "caught in the blast" ear-ring effect),
+`knife-stab.mp3` replacing the melee sound, and `running.mp3`/`walking.mp3` as real footstep
+loops tied to sprint state — with the latter two explicitly left untrimmed for this pass to
+handle, "it's gonna be on loop anyways."
+
+**Background music** (`client.js`): one looping `BufferSource` at gain 2, started in `onJoined`
+(guarded so joining mid-match doesn't restart it if somehow called twice), stopped in
+`onMatchEnded` via the same explicit-handle stop pattern as the AKM spray loop — so it doesn't
+keep playing under the game-over sting.
+
+**Explosion volume**: `gain: 2` → `gain: 3.5` (batch 35 boosted it once already; still came
+back "still low" after that).
+
+**Grenade ear-ring, the trickiest one — needed a server change, not just client audio.** The
+`hit` broadcast (`server/index.js`) only ever carried `shooterId`/`targetId`/`health`, nothing
+identifying WHAT caused it — added `weapon: weaponName` (both existing `applyDamage` call
+sites, bullets/melee and grenade splash, already pass a real weapon name, `'Grenade'` for
+blast damage specifically) so the target's own client can tell a grenade hit apart from a
+regular one. Client's `case 'hit':` now checks `msg.weapon === 'Grenade'` (only for hits on the
+local player) and calls `playRingEffect()` — plays `ring.mp3` in full (flat/non-positional,
+same reasoning as your own gunfire: this represents damage to YOUR ears, not a world sound to
+localize) then fades it to silence over the last 0.8s via a real `GainNode` ramp
+(`linearRampToValueAtTime`), since "at last it fades away" needed an actual envelope, not
+trusting the raw clip to already taper off.
+
+**Knife**: `sfx.shoot()`'s melee branch swapped from a synthesized `tone()` beep to
+`playBuffer('knifeStab')` — one line, same call pattern as every other real-recording swap in
+this project.
+
+**Footsteps — the one requiring real audio trimming, done properly with tools, not guessed.**
+Neither file had silence to signal loop boundaries in an obvious way, so `ffmpeg` (installed
+fresh for this — wasn't available before) got used two ways: `silencedetect` to find the actual
+per-step gaps, and a decoded-PCM RMS envelope (via Python/numpy over raw WAV samples, no
+listening needed) to see the loudness pattern over the whole file. That combination revealed:
+- `running.mp3` (8.1s raw) has clean, evenly-spaced footsteps the entire way through except a
+  ~0.3s lead-in and ~0.9s trailing silence — trimmed to just the real step content
+  (`[0.30s, 7.20s]` → 6.95s).
+- `walking.mp3` (20.5s raw) turns out to have TWO different characters: discrete individual
+  footsteps for its first ~6-8s (matching running's style, just slower cadence), then the RMS
+  envelope shows it becomes dense/continuous for the remaining ~12s — a different recording
+  texture, not more of the same steps. Looping the back half would have sounded like a
+  different walk mid-loop, so only the clean discrete-step front portion was kept
+  (`[0.14s, 6.20s]` → 6.10s).
+- Both trims got a tiny (20-30ms) fade in/out at the cut points specifically to avoid an
+  audible click where the loop seam is (`afade`), and both were re-verified afterward with
+  `silencedetect` at a coarser threshold (0.5s) to confirm no accidental internal gap survived
+  the cut — neither did.
+- `setFootstepMode('run'|'walk'|null)` (new, `client.js`) manages one swappable loop source —
+  called from `updateMovement` based on `isMoving`/`sprinting` (both already computed there),
+  from the `falling` branch (stops footsteps while airborne), and from the `animate()` call
+  site's else-branch (stops them when `updateMovement` isn't even running — paused, dead, back
+  at the menu — since that function wouldn't otherwise get a chance to notice the state
+  changed). Verified the state machine itself with a standalone simulation (idle→walk→walk
+  again→run→idle→airborne→walk→dead) before trusting it — no double-starts on a repeated mode,
+  every transition stops the old loop before starting the new one, ends silent.
+
+Verified before deploying: `node --check` on both touched files. The trimmed
+running/walking re-checked with `silencedetect` (no gaps >0.5s survived). Footstep state
+machine simulated standalone. All 5 new sound files confirmed reachable (curl 200 each) and
+every new function/field (`startBackgroundMusic`, `playRingEffect`, `setFootstepMode`,
+`weapon: weaponName` in the hit broadcast) grep-confirmed live on the remote. pm2 restarted
+clean. Not browser-tested per standing instruction — audio timing/feel and loop seam
+smoothness specifically need a real listen, which is what this summary is for.
+
+## Batch 47 (2026-09-15): DONE — fixed ring sound playing before the explosion, not after
+
+User caught it live: the grenade ear-ring was playing BEFORE the explosion sound instead of
+after.
+
+**Root cause (server-side ordering, not a client timing issue):** `explodeGrenade()` ran the
+per-player damage loop — which calls `applyDamage()`, broadcasting a `hit` message per affected
+player — and only broadcast `grenadeExploded` AFTER that whole loop finished. WebSocket
+delivers messages in send order, so send order IS playback order on the receiving client: every
+affected player's `hit` (which triggers `playRingEffect()` client-side, added last batch) was
+arriving and starting playback BEFORE `grenadeExploded` (which triggers the explosion sound)
+ever went out. Moved the `grenadeExploded` broadcast to the TOP of the function, before the
+damage loop — explosion now always sends first.
+
+**Verified live against the real server, not just by reading the diff:** a two-client `ws` test
+— thrower creates a room, a victim joins and reports its own real spawn position back, the
+thrower throws a grenade with that exact position as the origin (guaranteeing the victim is
+inside the blast radius once it detonates on its normal fuse timer) — and the test asserts the
+victim's client receives `grenadeExploded` before `hit`. First attempt used a made-up origin
+near world-origin and timed out (both players' real spawn points are wherever
+`randomSpawn()` picks, not `[0,0,0]`) — fixed by reading the victim's actual spawned position
+from the room state instead of guessing, then it passed cleanly:
+`['grenadeExploded', 'hit']`, explosion first.
+
+Syntax-checked, deployed, pm2 restarted clean (twice — once to deploy, once more to clear the
+test room from memory). Confirmed via the live test rather than trusting the code-read alone,
+since this was exactly the kind of ordering bug that "looks right in the diff" but only proves
+itself against the real message flow.
+
+## Batch 48 (2026-09-15): DONE — enemy footsteps now spatial, own footsteps quieter
+
+Scoped in a "talk" round first, then built after the user corrected their own framing: own
+footsteps down to 70-80%, enemy footsteps distance-faded like gunfire (not a fixed reduced
+gain — distance alone tells them apart from the player's own).
+
+**Own footsteps**: `gain: 0.75` (was full/1) in `setFootstepMode` (local-only, flat, unchanged
+otherwise).
+
+**Enemy footsteps — new capability, reusing three already-built systems rather than inventing
+one:**
+- The `state` protocol already relayed `moving`/`crouch`/`prone` per player at 20Hz (already
+  driving remote leg-swing animation) but never distinguished walk from run — added `sprint`
+  end-to-end: client promotes its local `sprinting` const to a module-level `isSprinting`
+  (mirroring how `isMoving` already worked), sends it in the outgoing `state` message; server
+  stores `player.sprint` and relays it in both places it already relays `crouch`/`prone`/
+  `moving` (the initial `joined` snapshot and the 20Hz broadcast tick) — pure forwarding, no
+  new server logic.
+- `setRemoteFootstepMode(playerId, mode, pos)` (new) — same "one swappable loop per key, no
+  restart on a repeated same-mode call" shape as the AKM's remote spray loop (batch 37), but
+  simpler: that one had to infer "still firing" from a timeout between discrete shot events;
+  movement state arrives continuously, so the mode is just directly known from each `state`
+  tick, no inference needed. Started at full gain (`1`, not reduced) — per the corrected ask,
+  distance/occlusion alone should differentiate an enemy's footsteps, not an artificially
+  quieter base.
+- Per-frame position tracking in `animate()`'s existing remote-player loop, same split as the
+  grenade tick (batch 38): reposition every frame (cheap), throttle the occlusion raycast to
+  ~180ms — flagged as more load-bearing here than for the grenade tick, since several players
+  could realistically be moving/running simultaneously (grenades are rarer).
+- Cleanup: `removeRemote()` now also stops that player's footstep loop, so a mid-stride
+  disconnect doesn't orphan a looping sound.
+
+**Verified before deploying:** the mode-transition state machine simulated standalone across
+multiple concurrent players (idle→walk×3 repeats→run→dead→walk→disconnect for one, independent
+run-only for a second) — no double-starts on repeated same-mode calls, correct per-player
+isolation, clean removal on disconnect. Then a REAL two-client `ws` test against the live
+server (not just the simulation): one client sends a `state` update with `sprint:true`, a
+second client (in the same room) is asserted to receive that exact field back in its own
+`state` broadcast — passed on the first try. Syntax-checked both files, pm2 restarted clean
+(twice — deploy, then again to clear the test room). Not browser-tested per standing
+instruction — the actual audible balance between 75%-you and full-gain-distance-faded-them is
+exactly the kind of thing that needs a real listen with a second person.
+
+## Batch 49 (2026-09-15): DONE — nametag removed, real headshot hitbox bug found and fixed
+
+Two of three asks from this round ("remove the nametag, headshots sometimes don't register,
+and the crosshair — talk first on that one"). Crosshair deliberately NOT started, per the
+user's own "talk first" instruction — needs a scoping conversation before any code changes.
+
+**Nametag removed.** The floating name sprite above remote players' heads (`nameSpriteFor()`,
+a canvas-drawn text texture on a `THREE.Sprite`) is gone entirely — justified by the spatial
+audio system (batches 37-39, 48) already giving directional identification, making the visual
+tag redundant. Confirmed via grep no other code referenced the removed function before deploying.
+
+**Headshot bug — found the real root cause, not a guess.** The user's own hypothesis ("i think
+the head box isnt correctly placed") was right. `handleAttack`'s hit-cylinder yMax
+(`STAND_HEAD_OFFSET=1.5`/`CROUCH_HEAD_OFFSET=1.0`/`PRONE_HEAD_OFFSET=0.35`, each +0.2 margin)
+and the client's actual rendered head geometry (`HEAD_Y=1.7` center, 0.32-unit box) were two
+independently-tuned numbers that had drifted apart:
+- **Standing:** visual head spans world-Y [1.54, 1.86], but the old yMax capped at 1.7 — the
+  top ~0.16 units (literally the upper half of the visible head) was a TOTAL WHIFF, not even a
+  body hit. Aiming at the top of someone's head would just miss outright.
+- **Crouch:** same pattern — `animateRemoteFigure`'s crouch squash (`mesh.scale.y = 0.72`)
+  scales the visual head down too (true top ≈1.339), but the old yMax was only 1.2.
+- **Prone:** worse — the whole figure rotates -90° about X to lie flat, which turns the head's
+  old Z-thickness into its new Y-extent, collapsing the visual head to a thin band right at
+  ground level ([0, 0.32]) instead of "the top of the model". The old headshot zone (top 18% of
+  the 0.55-tall prone cylinder = [0.451, 0.55]) never overlapped that band at all — prone
+  headshots were essentially impossible, not just unlikely.
+
+**Fix:** added three new shared constants to `gameData.js` — `HEAD_CENTER_Y` (1.7),
+`HEAD_HALF` (0.16), `CROUCH_SCALE_Y` (0.72) — as the single source of truth for both the
+client's rendered head box (`buildCharacterFigure`/`animateRemoteFigure`, client.js, which now
+import and use these instead of independent local numbers) and the server's hit logic
+(`headBandFor()`, new helper in server/index.js), so the two systems can't drift apart again
+the way `STAND_HEAD_OFFSET`/`CROUCH_HEAD_OFFSET`/`HEADSHOT_ZONE_FRAC` did (all three removed).
+Standing/crouch: the overall hit-cylinder top now equals the true visual head-top (fixes the
+whiff). Prone: the overall hit-cylinder height is intentionally left at its old, more generous
+`PRONE_HEAD_OFFSET`-based value (torso/legs still need real coverage) but headshot
+classification now checks the correct absolute ground-level band instead of a "top X%
+of the cylinder" heuristic that doesn't apply once a figure is lying flat (head and torso end
+up at nearly the same Y once prone — verified this isn't a marginal case, torso's own
+world-Y span after rotation is a subset of the head's).
+
+**Side effect caught and fixed:** batch 24's diagonal cover wall (`makeDiagonalCoverWall`,
+`coverH=1.3`) was tuned so a crouched player's OLD hit-cylinder top (1.2) sat fully behind it
+with a 0.1 margin. Since crouch's true top is now 1.339, bumped `coverH` to 1.45 (keeps a real
+~0.11 margin above the new crouch top, still well under standing's 1.86) so that cover spot
+doesn't regress.
+
+**Verified before deploying:**
+- Standalone simulation (`sim_headshot.mjs`, reusing the exact `rayCylinderDist` from
+  server-index.js) — 13 checks across all 3 stances (torso/head-bottom/head-top/above-head)
+  plus an angled (non-level) ray sanity check, all passing, explicitly including the 3
+  previously-broken "head-top" cases in each stance that used to whiff or misclassify.
+- A REAL two-client `ws` test against the live running server (not just the diff): fired an
+  AKM shot at the victim's exact visual head-top world-Y (1.85) — the precise case that used to
+  be a complete whiff — and confirmed a `hit` message actually arrives with `dmg=40`
+  (`round(16*2.5)`, a real headshot), plus a body shot (Y=1.25, dmg=16, no bonus) and a
+  head-center shot (Y=1.70, dmg=40) as controls. All 3 passed on first run.
+
+Syntax-checked all three files locally and on remote, pm2 restarted clean (twice — deploy, then
+again to clear the test room from memory), grep-confirmed the new constants
+(`HEAD_CENTER_Y`/`HEAD_HALF`/`CROUCH_SCALE_Y`) are live in the served `gameData.js`, confirmed
+`nameSpriteFor` is completely absent from the live `client.js`.
+
+**Not started — crosshair redesign.** User explicitly said "talk first" on this one (partial
+cross + center dot excluding the reference image's outer ring, plus a sprint-triggered
+expand/bloom animation). Waiting on that scoping conversation before writing any code.
+
+## Batch 50 (2026-09-15): DONE — new broken-cross crosshair, sprint + fire bloom
+
+Scoped in a "talk" round first per the user's own "talk first" instruction, then built after
+confirming one open question (sprint-only bloom, or also a quick kick on firing) — user chose
+both.
+
+**Shape:** replaced the old single filled-circle `#crosshair` div with 5 children: a center
+`.ch-dot` plus 4 `.ch-tick` marks (top/bottom/left/right), no connecting ring — matches the
+user's reference image minus the circle, per their explicit "excluding the circle" ask.
+
+**Bloom, both triggers, same mechanism:** each tick's position is `translate(-50%, calc(-50% ±
+var(--spread) ± var(--extra)))` — `--spread` is the sprint-aware base gap (7px normal, 13px
+sprinting, set every frame in `updateMovement` off the existing `sprinting` local), `--extra`
+is a short-lived fire-bloom kick (`crosshairKick()`, called from `fire()`: jumps `--extra` to
+6px instantly, then back to 0 after 70ms). Both variables feed into the same CSS `transform`,
+which already has a 140ms ease-out transition — so a change to EITHER variable animates
+smoothly with zero extra JS easing code; the fire-kick's fast-out/eased-back feel comes from
+setting the peak instantly and letting the transition handle the return.
+
+**Hit marker preserved:** `showHitMarker()` used to flash `crosshair.style.background` directly
+(only worked because the old crosshair was one plain div). Adapted to set `--ch-color` (which
+every tick/dot already read for their own background) instead, so the same red-flash-and-scale
+feedback still works against the new multi-piece shape — `transform: scale(1.8)` on the 0×0
+`#crosshair` wrapper scales its whole subtree around the exact center point, no translate
+compensation needed (unlike the old version, which had to re-add `translate(-50%,-50%)` itself
+since its own box wasn't zero-sized).
+
+Verified before deploying: `node --check` on client.js, a markup sanity check confirming all 5
+child elements exist exactly once in index.html, syntax-checked again on remote, pm2 restarted
+clean, grep-confirmed `crosshairKick`/`--spread`/`--extra` are live in the served client.js and
+the 5 crosshair child elements are live in the served index.html. Not browser-tested per
+standing instruction — the actual visual feel of the bloom timing/spread distances is exactly
+the kind of thing that needs a real look in-game; flagging the two tunable numbers (`--spread`:
+7px/13px, kick: 6px/70ms) in case they need adjusting after a look.
+
+## Batch 51 (2026-09-15): DONE — shotgun distance falloff, knife headshot one-shot kill
+
+Scoped in a "talk only" round first (user weighed sniper-reskin vs a falloff fix, chose
+falloff; then asked for exact per-weapon damage numbers before deciding the curve), then built
+after explicit go-ahead with the two curve parameters the user picked.
+
+**Shotgun distance falloff.** Root problem: `damage:60` was flat across the shotgun's whole
+28-unit range, and with the 2.5x headshot multiplier (`round(60*2.5)=150`, well past
+`MAX_HEALTH=100`) it was a guaranteed one-shot kill on ANY headshot at ANY distance inside its
+range — playing like a sniper rather than a shotgun. Added `falloffStart:8, falloffEnd:28,
+falloffMinDamage:16` to the Shotgun's entry only (`gameData.js`) — no other weapon defines
+these fields, so the new logic is a pure no-op for AKM/Glock/Knife. `handleAttack`
+(`server/index.js`) now computes a linear falloff between those two distances when they're
+present: full 60 damage inside the 8-unit "kill zone" (unchanged, still a near-instant kill up
+close), tapering straight down to 16 by 28 units. Headshot multiplier still applies on top of
+the falloff-adjusted number, so a close headshot is still instantly lethal (150) but a far one
+is now weak (`round(16*2.5)=40`) instead of still guaranteed-lethal.
+
+**Knife headshot — one-shot kill.** The `weapon.type !== 'melee'` gate that excluded melee from
+headshot detection entirely was removed — headshot classification (using the same
+`bestHeadYMin`/`bestHeadYMax` band from batch 49's fix, already computed for every weapon type
+regardless) now applies uniformly to every weapon. No knife-specific multiplier was needed:
+the existing shared `HEADSHOT_MULTIPLIER=2.5` against the knife's 55 body damage already gives
+`round(55*2.5)=138`, comfortably past `MAX_HEALTH=100` — a guaranteed kill on any headshot
+regardless of the target's current health, exactly the ask. Body-shot knife damage (55,
+unchanged) still takes 2 hits.
+
+**Verified before deploying:**
+- Standalone simulation (`sim_falloff.mjs`) — 10 checks: shotgun full damage through the whole
+  8-unit kill zone including the exact boundary, correct linear interpolation at 3 points
+  in between, floor-clamping past max range, a close headshot still hitting 150, a far
+  headshot dropping to 40 (explicitly asserted `<100`, i.e. no longer a guaranteed kill), knife
+  body damage unchanged at 55, knife headshot at 138 (explicitly asserted `>=100`). All passed.
+- A REAL two-client `ws` test against the live running server: point-blank shotgun body shot
+  confirmed still 60; a far (dist≈25) shotgun HEADSHOT landed with `dmg=59` — matching the
+  hand-calculated falloff math (`60-44×0.83≈58.7`) almost exactly, live proof the formula runs
+  correctly end-to-end, not just in the isolated simulation; knife body shot confirmed 55
+  unchanged; knife headshot confirmed `dmg=100` (victim health dropped to exactly 0) — a real
+  one-shot kill against a full-health target. One far body-shot line of sight whiffed due to a
+  short obstacle blocking that specific ray height on the `ruins` map (confirmed as map
+  geometry, not the fix — the headshot case on the identical line, aimed higher, passed clean
+  through the same low obstacle) — not chased further since the headshot case on the same line
+  already gave direct live confirmation of the falloff math.
+
+Syntax-checked both files locally and on remote, confirmed only the Shotgun's `WEAPONS` entry
+carries the new falloff fields (AKM/Glock both `undefined`), pm2 restarted clean (twice —
+deploy, then again to clear the test rooms from memory).
+
+## Batch 52 (2026-09-15): DONE — real death-fall + eyelid-close camera sequence, respawn light-beam effect
+
+User asked to replace the old death experience (a plain centered "Eliminated by X" text label,
+no camera/visual feedback at all) with a real sequence: camera falls to the ground flat, face
+to the sky, eyelids flutter then slowly close, fall.mp3 synced to the fall; then on respawn,
+light circles appear around the character synced to a respawn.mp3, "like the light from a
+spaceship." Told to fill in the gaps and apply it directly (no "talk first" gate this round),
+then mid-implementation explicitly confirmed wanting the eyelid-REOPENING half on respawn too.
+
+**Found the two source files already sitting in `/home/chicmic/a/games/`** (`fall.mp3` 1.848s,
+`respawn.mp3` 1.541s, measured via mutagen) — same drop-a-file-and-I-process-it pattern as
+every other named asset this project has used. Both durations became the exact timing anchors
+for the new animation, not guessed numbers.
+
+**Death sequence (`onLocalDeath`/`updateDeathAnim`, client.js):** starting from whatever
+eyeHeight/pitch/stance the player was actually in at the moment of death (not a fixed pose —
+correctly handles dying while crouched/prone/on an elevated platform), the camera:
+- Drops from its current height to a low resting height (current eye height minus a fixed
+  0.32 rest height, so it lands correctly relative to whatever floor/platform they died on,
+  not always world-Y 0).
+- Tilts `camera.rotation.x` up to ~86° (looking almost straight at the sky) and adds a small
+  randomized roll (`camera.rotation.z`, ±~9-17°) so it reads as toppling to one side, not a
+  perfectly clean mechanical drop.
+- Both eased with `easeOutCubic` over exactly `DEATH_FALL_MS=1848` — fall.mp3's measured
+  length — so the visual collapse finishes right as the sound does.
+- `sfx.fall()` plays the instant the sequence starts, flat/non-positional (same reasoning as
+  the existing grenade ear-ring effect: this is YOUR view collapsing, not a world sound others
+  need to localize).
+
+**Eyelids** — two JS-created overlay divs (`eyelidTop`/`eyelidBottom`, curved leading edge via
+`border-radius` so they read as lids rather than a flat wipe), height driven every frame by
+`setEyelidCoverage(pct)` rather than a CSS transition, so it can be kept in exact lockstep with
+real audio lengths instead of a fixed CSS duration:
+- First 500ms: two quick flutter pulses (`|sin|` wave peaking at ~16% coverage) — the "eyelids
+  flap" the user asked for, read as consciousness flickering right after impact.
+- Remaining time up to `RESPAWN_MS` (3000ms, imported from `gameData.js` — the server's actual
+  respawn delay): `easeInCubic` slow close from 0 to full coverage (black), landing fully shut
+  right as the server's real respawn message should arrive.
+- Mouse look is now frozen during death too (the `mousemove` handler previously only checked
+  `pointerLocked`, not `localAlive` — a real pre-existing gap, since nothing else froze camera
+  rotation on death before this batch) — otherwise moving the mouse mid-death would fight the
+  scripted `camera.rotation.x/z` the fall sequence drives directly.
+
+**Respawn — both halves:**
+- **Eyelids reopen** (`openEyelids()`, `onLocalRespawn`): reverses from whatever coverage the
+  lids actually measured at that instant (tracked via `eyelidPct`, not assumed to be exactly
+  1) back to 0 over 1500ms — respawn.mp3's measured length — so a respawn that lands slightly
+  early or late relative to the death sequence's own timing still opens cleanly from wherever
+  it really was, no snap/jump.
+- Camera state restored: `camera.rotation.x` reset to the stored `pitch` variable (untouched
+  during death since mouse look was frozen) and `camera.rotation.z` cleared — the death fall
+  drove these directly, bypassing the normal look variables, so respawn has to explicitly hand
+  control back.
+- **Light-circle "beam-in" effect** (`spawnRespawnEffect(pos)`, new): 3 staggered expanding
+  rings (`THREE.RingGeometry`, additive cyan glow, launched 140ms apart for a layered pulse —
+  "light circles," plural, as described) plus a soft glowing vertical beam column for the
+  "spaceship light" look specifically called out, both fading out over ~1.5s to match
+  `respawn.mp3`. Triggered from the server's EXISTING `respawn` broadcast (`id`/`pos`/`health`,
+  already sent to the whole room, not just the respawning player, unchanged from before this
+  batch — no server code touched this round) for every respawn regardless of whose it is, so
+  anyone nearby actually sees a teammate or enemy visibly reappear, not just a private effect
+  only the respawning player experiences. Sound (`sfx.respawnBeam`) goes through the same
+  positional pipeline as gunfire/explosions/footsteps for the same reason — everyone nearby
+  should hear it fade with distance, not just the person spawning.
+
+**Scope note, not chased further:** the same `onLocalDeath` sequence also fires for the
+existing "fell off the play area" death path (env kill, not combat) — deliberately left
+uniform rather than special-cased, since forcing a plain uniform fall-to-sky pose there too is
+a reasonable default; flagging in case that specific case ends up looking odd layered on top of
+the existing off-edge fall-through-space sequence, which is a separate, older mechanic.
+
+**Verified before deploying:** `node --check` on client.js; grep-confirmed the old synthesized
+`sfx.death()` tone was fully removed with no dangling call sites (would have thrown — the
+`'killed'` handler used to call it directly, now moved to `sfx.fall()` inside `onLocalDeath`
+itself); a standalone numeric simulation of every timing curve (fall-progress easing hits 0/1
+at the right instants and clamps after, eyelid coverage is 0 at blink-start, exactly 1 at
+`RESPAWN_MS`, monotonically non-decreasing through the whole close phase with no flicker, the
+blink flutter peaks near the intended 0.16, and `openEyelids`'s reverse curve correctly starts
+from a partial value rather than assuming 1) — 13/13 checks passed. Both new sound files
+confirmed reachable (curl 200 each), every new function/element
+(`spawnRespawnEffect`/`updateDeathAnim`/`openEyelids`/`setEyelidCoverage`) grep-confirmed live
+on the remote, pm2 restarted clean. Not browser-tested per standing instruction — the exact
+fall pose/timing feel, eyelid curve shape, and respawn beam's visual weight are exactly what
+the user said they'd test themselves and report back on.

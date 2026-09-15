@@ -8,11 +8,11 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   WEAPONS, MAX_HEALTH, RESPAWN_MS, MAX_PLAYERS_PER_ROOM, SPAWN_POINTS, SPAWN_SAFE_DIST,
-  STAND_HEAD_OFFSET, CROUCH_HEAD_OFFSET, PRONE_HEAD_OFFSET, PLAYER_RADIUS, getMapLayout,
+  PRONE_HEAD_OFFSET, HEAD_CENTER_Y, HEAD_HALF, CROUCH_SCALE_Y, PLAYER_RADIUS, getMapLayout,
   GRENADE_COOLDOWN_MS, GRENADE_FUSE_MS, GRENADE_THROW_SPEED, GRENADE_BLAST_RADIUS,
   GRENADE_MAX_DAMAGE, GRENADE_RADIUS, GRENADE_LETHAL_RADIUS, GRENADE_PICKUP_AMOUNT,
   MAPS, DEFAULT_MAP, PICKUP_POINTS, PICKUP_RADIUS, PICKUP_RESPAWN_MS,
-  HEADSHOT_MULTIPLIER, HEADSHOT_ZONE_FRAC,
+  HEADSHOT_MULTIPLIER,
 } from '../shared/gameData.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -168,7 +168,10 @@ function respawn(target, room) {
 
 function applyDamage(shooter, target, dmg, room, weaponName) {
   target.health = Math.max(0, target.health - dmg);
-  broadcastRoom(room, { type: 'hit', shooterId: shooter.id, targetId: target.id, health: target.health });
+  // `weapon` lets the target's own client tell a grenade hit apart from a bullet/melee one —
+  // used for the ear-ringing effect, which should only play for someone actually caught in a
+  // blast, not every hit.
+  broadcastRoom(room, { type: 'hit', shooterId: shooter.id, targetId: target.id, health: target.health, weapon: weaponName || null });
   if (target.health <= 0 && target.alive) {
     target.alive = false;
     if (shooter.id !== target.id) shooter.kills += 1; // a self-frag is a death, not a kill credit
@@ -250,6 +253,22 @@ function rayAABBDist(origin, dir, box) {
 // Distance along the ray to its nearest intersection with a vertical cylinder (a player's
 // hitbox: fixed real-world radius, clamped to a feet-to-head Y range) — a proper hit volume,
 // unlike the old angle-cone check whose effective hit width grew with range.
+// The real head band (world-Y, relative to feet), matching what buildCharacterFigure/
+// animateRemoteFigure (client.js) actually renders — NOT an independently-tuned offset, so it
+// can't drift away from the visual model again. Standing/crouch: the head is the top of the
+// model, uniformly squashed by CROUCH_SCALE_Y while crouched (matches the whole figure's
+// mesh.scale.y). Prone: the whole figure is rotated -90 about X (lying flat) — that turns the
+// head's old Z-thickness into its new Y-extent, collapsing it to a thin band right at ground
+// level instead of "the top of the model". Torso/legs collapse into effectively the same band
+// once prone (their own Z-thickness is similar), so Y alone can't separate head from body while
+// prone — headshots there use this exact thin band rather than a fraction of the overall
+// (much taller, deliberately generous) prone hit-cylinder.
+function headBandFor(other) {
+  if (other.prone) return [0, HEAD_HALF * 2];
+  const scale = other.crouch ? CROUCH_SCALE_Y : 1;
+  return [(HEAD_CENTER_Y - HEAD_HALF) * scale, (HEAD_CENTER_Y + HEAD_HALF) * scale];
+}
+
 function rayCylinderDist(origin, dir, cx, cz, radius, yMin, yMax) {
   const ox = origin[0] - cx, oz = origin[2] - cz;
   const dx = dir[0], dz = dir[2];
@@ -357,30 +376,43 @@ function handleAttack(player, room, weaponIdx, origin, dir) {
 
   let best = null;
   let bestDist = Infinity;
-  let bestYMin = 0, bestYMax = 0;
+  let bestHeadYMin = 0, bestHeadYMax = 0;
   for (const other of room.players.values()) {
     if (other.id === player.id || !other.alive) continue;
-    const headOffset = other.prone ? PRONE_HEAD_OFFSET : other.crouch ? CROUCH_HEAD_OFFSET : STAND_HEAD_OFFSET;
+    const [headYMin, headYMax] = headBandFor(other);
     const yMin = other.pos[1];
-    const yMax = other.pos[1] + headOffset + 0.2;
+    // Standing/crouch: the head band's own top IS the top of the model, so the overall
+    // hit-cylinder should reach exactly that high — anything above it used to be a pure whiff
+    // even though the visible head model reached higher (the bug the user reported). Prone
+    // collapses head and torso into the same thin band (see headBandFor), so the overall
+    // hit-cylinder keeps its own separate, deliberately generous PRONE_HEAD_OFFSET-based
+    // height for torso/legs coverage instead of shrinking down to just the head band.
+    const yMax = other.pos[1] + (other.prone ? PRONE_HEAD_OFFSET + 0.2 : headYMax);
     const dist = rayCylinderDist(origin, d, other.pos[0], other.pos[2], hitRadius, yMin, yMax);
     // a hit only counts if it's closer than any wall in the way — that's what stops shots
     // from passing straight through obstacles to whoever's standing behind them.
     if (dist <= wallDist && dist < bestDist) {
       best = other;
       bestDist = dist;
-      bestYMin = yMin;
-      bestYMax = yMax;
+      bestHeadYMin = other.pos[1] + headYMin;
+      bestHeadYMax = other.pos[1] + headYMax;
     }
   }
   if (best) {
     let dmg = weapon.damage;
-    if (weapon.type !== 'melee') {
-      const impactY = origin[1] + d[1] * bestDist;
-      const headZoneStart = bestYMin + (bestYMax - bestYMin) * HEADSHOT_ZONE_FRAC;
-      if (impactY >= headZoneStart) dmg = Math.round(weapon.damage * HEADSHOT_MULTIPLIER);
+    // Distance falloff (only the Shotgun defines these fields, see gameData.js) — full damage
+    // inside the point-blank kill zone, tapering linearly toward falloffMinDamage by max range,
+    // so it can't double as a sniper just by still having reach.
+    if (weapon.falloffStart != null && bestDist > weapon.falloffStart) {
+      const t = Math.min(1, (bestDist - weapon.falloffStart) / (weapon.falloffEnd - weapon.falloffStart));
+      dmg = weapon.damage - (weapon.damage - weapon.falloffMinDamage) * t;
     }
-    applyDamage(player, best, dmg, room, weapon.name);
+    // Headshot detection now applies to every weapon type, melee included — an aimed knife
+    // strike to the head is a real one-shot kill (round(55*2.5)=138, past MAX_HEALTH=100),
+    // same mechanism every ranged weapon already used.
+    const impactY = origin[1] + d[1] * bestDist;
+    if (impactY >= bestHeadYMin && impactY <= bestHeadYMax) dmg *= HEADSHOT_MULTIPLIER;
+    applyDamage(player, best, Math.round(dmg), room, weapon.name);
   }
 }
 
@@ -430,6 +462,13 @@ function throwGrenade(player, room, origin, dir) {
 }
 
 function explodeGrenade(room, grenade) {
+  // Broadcast the explosion itself BEFORE resolving per-player damage below — this used to run
+  // the other way around (damage loop first, `grenadeExploded` only after), so every affected
+  // player's `hit` message — and the ear-ring it triggers client-side — arrived and played
+  // before the explosion's own visual/sound ever did. WebSocket delivers in send order, so
+  // send order IS playback order here; the explosion needs to go out first for its sound to
+  // land before the ring that's supposed to follow it.
+  broadcastRoom(room, { type: 'grenadeExploded', pos: grenade.pos });
   // no thrower exclusion here on purpose — a grenade you're standing too close to when it
   // goes off hurts you too, same as everyone else in the blast.
   for (const p of room.players.values()) {
@@ -456,7 +495,6 @@ function explodeGrenade(room, grenade) {
       applyDamage(thrower, p, dmg, room, 'Grenade');
     }
   }
-  broadcastRoom(room, { type: 'grenadeExploded', pos: grenade.pos });
 }
 
 // A thrown grenade used to fly straight through every wall — the physics tick below only ever
@@ -587,13 +625,17 @@ wss.on('connection', (ws) => {
       // client-side surfaceHeightAt knows their height) — grenades need their own awareness
       // of this or they just fall straight through a staircase to the ground below it, see
       // rampHeightAt below.
-      // durationMin === 0 (or missing) means no time limit — matchEndsAt stays null and the
+      // durationSec === 0 (or missing) means no time limit — matchEndsAt stays null and the
       // client just doesn't show a countdown. Otherwise the match auto-ends and every client
       // gets kicked to the final scoreboard when the timer set at room creation runs out.
-      const durationMin = Math.max(0, Math.min(180, Number(msg.durationMin) || 0));
-      if (durationMin > 0) {
-        room.matchEndsAt = Date.now() + durationMin * 60000;
-        room.matchEndTimer = setTimeout(() => endMatch(room), durationMin * 60000);
+      // Seconds now, not whole minutes only — the create-room time field grew a seconds digit
+      // (`step="1"` on the input, client.js's parseDurationSec), so this needs real second
+      // precision, not `msg.durationMin` rounded down. 10800s = the same 180-minute ceiling as
+      // before, just expressed in the new unit.
+      const durationSec = Math.max(0, Math.min(10800, Number(msg.durationSec) || 0));
+      if (durationSec > 0) {
+        room.matchEndsAt = Date.now() + durationSec * 1000;
+        room.matchEndTimer = setTimeout(() => endMatch(room), durationSec * 1000);
       }
       initPickups(room);
       rooms.set(room.id, room);
@@ -629,6 +671,7 @@ wss.on('connection', (ws) => {
       player.crouch = !!msg.crouch;
       player.prone = !!msg.prone;
       player.moving = !!msg.moving;
+      player.sprint = !!msg.sprint; // lets other clients tell running footsteps from walking ones
       return;
     }
 
@@ -714,7 +757,7 @@ function joinRoom(ws, room) {
     weapons: WEAPONS,
     players: [...room.players.values()].map((p) => ({
       id: p.id, name: p.name, pos: p.pos, rot: p.rot, weapon: p.weapon, health: p.health, alive: p.alive,
-      crouch: p.crouch, prone: p.prone, moving: p.moving,
+      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint,
     })),
   });
   broadcastRoom(room, { type: 'playerJoined', player: { id: player.id, name: player.name } }, player.id);
@@ -728,7 +771,7 @@ setInterval(() => {
     checkPickups(room);
     const players = [...room.players.values()].map((p) => ({
       id: p.id, pos: p.pos, rot: p.rot, weapon: p.weapon, health: p.health, alive: p.alive,
-      crouch: p.crouch, prone: p.prone, moving: p.moving,
+      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint,
     }));
     const grenades = (room.grenades || []).map((g) => ({ id: g.id, pos: g.pos }));
     const pickups = (room.pickups || []).filter((p) => p.active).map((p) => ({ idx: p.idx, pos: p.pos, type: p.type, weaponId: p.weaponId }));
