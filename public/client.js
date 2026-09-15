@@ -128,6 +128,7 @@ const weaponBar = document.getElementById('weaponBar');
 const pickupToast = document.getElementById('pickupToast');
 const mapSelect = document.getElementById('mapSelect');
 const matchDurationInput = document.getElementById('matchDurationInput');
+const memeModeToggle = document.getElementById('memeModeToggle');
 const matchTimer = document.getElementById('matchTimer');
 const matchEndScreen = document.getElementById('matchEndScreen');
 const matchEndBody = document.getElementById('matchEndBody');
@@ -212,11 +213,174 @@ const savedAuth = getAuth();
 if (savedAuth && savedAuth.username) showMenu(savedAuth.username);
 else showAuth();
 
-// ---------- Sound: everything synthesized with WebAudio, no asset files ----------
+// ---------- Sound: real recorded clips for weapons/grenade, synthesized WebAudio for
+// everything else (hit markers, pickups, damage, melee, the grenade throw cue — no recording
+// was provided for those) ----------
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function unlockAudio() { if (audioCtx.state === 'suspended') audioCtx.resume(); }
 document.addEventListener('click', unlockAudio, { once: true });
 document.addEventListener('keydown', unlockAudio, { once: true });
+
+// Decoded once each at page load (these are all under 4s, so by the time a player has gotten
+// through auth + the menu + actually joined a room, decoding is long finished) and cached —
+// `playBuffer` just clones a fresh BufferSource per play, which is what lets the same clip
+// overlap itself (two grenades ticking at once, rapid-fire glock taps) with zero extra work.
+const SOUND_FILES = {
+  akmFire: '/sounds/akm-fire.mp3',
+  akmReload: '/sounds/akm-reload.mp3',
+  glockFire: '/sounds/glock-fire.mp3',
+  glockReload: '/sounds/glock-reload.mp3',
+  shotgunFire: '/sounds/shotgun-fire.mp3',
+  shotgunPump: '/sounds/shotgunpump.mp3',
+  shotgunReload: '/sounds/shotgun-reload.mp3',
+  grenadeClock: '/sounds/grenade-clock.mp3',
+  grenadeExplosion: '/sounds/grenade-explosion.mp3',
+};
+const soundBuffers = {};
+for (const [key, url] of Object.entries(SOUND_FILES)) {
+  fetch(url)
+    .then((res) => res.arrayBuffer())
+    .then((arr) => audioCtx.decodeAudioData(arr))
+    .then((buf) => { soundBuffers[key] = buf; })
+    .catch((err) => console.error(`sound load failed: ${key}`, err));
+}
+// Returns the BufferSource so a caller can `.stop()` it early (only the AKM's looped spray
+// clip needs that — every other sound is a one-shot that's left to finish on its own).
+// Silently no-ops if the buffer hasn't decoded yet instead of throwing — there's no sane
+// fallback for a specific missing recording, and this only matters in the first instant after
+// page load, well before a player can actually be in a match to fire/reload/throw anything.
+function playBuffer(key, { gain = 1, loop = false } = {}) {
+  const buffer = soundBuffers[key];
+  if (!buffer) return null;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buffer;
+  src.loop = loop;
+  const g = audioCtx.createGain();
+  g.gain.value = gain;
+  src.connect(g); g.connect(audioCtx.destination);
+  src.start();
+  return src;
+}
+
+// ---------- Positional audio (remote gunfire + explosions): real 3D panning/distance falloff
+// via WebAudio's own AudioListener/PannerNode (HRTF binaural panning — genuinely directional on
+// headphones, this is the actual tool for "hear where the enemy is", not a hand-rolled stereo
+// hack) plus wall occlusion. Everything here is for OTHER players' sounds only — your own gun
+// is always right at your ears and stays the flat, non-positional playBuffer() above.
+audioCtx.listener.panningModel = 'HRTF';
+function updateAudioListener() {
+  const pos = new THREE.Vector3();
+  const dir = new THREE.Vector3();
+  camera.getWorldPosition(pos);
+  camera.getWorldDirection(dir);
+  const l = audioCtx.listener;
+  if (l.positionX) { // modern AudioParam-based API
+    l.positionX.value = pos.x; l.positionY.value = pos.y; l.positionZ.value = pos.z;
+    l.forwardX.value = dir.x; l.forwardY.value = dir.y; l.forwardZ.value = dir.z;
+    l.upX.value = 0; l.upY.value = 1; l.upZ.value = 0;
+  } else if (l.setPosition) { // older browsers
+    l.setPosition(pos.x, pos.y, pos.z);
+    l.setOrientation(dir.x, dir.y, dir.z, 0, 1, 0);
+  }
+}
+
+// Cheap ray-segment-vs-AABB occlusion test (same slab method as every other AABB check in this
+// project, just bounded to the segment's own length instead of an infinite ray) against
+// ACTIVE_WALLS — the same list that already blocks bullets server-side, so "behind a wall"
+// here matches what actually blocks a shot, invisible collision-only pieces included. O(wall
+// count) per call (~150 walls, each a handful of comparisons) — negligible even run on every
+// single gunshot event; the "optimized" part is WHEN it's called, not making the test itself
+// fancier: once per one-shot sound, and for the AKM's looping spray, re-checked only on each
+// incoming shotFired tick (~every 110ms while held) rather than every render frame.
+function isOccludedBetween(fromPos, toPos) {
+  const dx = toPos[0] - fromPos[0], dy = toPos[1] - fromPos[1], dz = toPos[2] - fromPos[2];
+  const dist = Math.hypot(dx, dy, dz);
+  if (dist < 0.001) return false;
+  const dirx = dx / dist, diry = dy / dist, dirz = dz / dist;
+  for (const o of ACTIVE_WALLS) {
+    const hw = o.w / 2, hh = o.h / 2, hd = o.d / 2;
+    let tmin = 0, tmax = dist;
+    if (Math.abs(dirx) < 1e-8) { if (fromPos[0] < o.x - hw || fromPos[0] > o.x + hw) continue; }
+    else {
+      const t1 = (o.x - hw - fromPos[0]) / dirx, t2 = (o.x + hw - fromPos[0]) / dirx;
+      tmin = Math.max(tmin, Math.min(t1, t2)); tmax = Math.min(tmax, Math.max(t1, t2));
+      if (tmin > tmax) continue;
+    }
+    if (Math.abs(diry) < 1e-8) { if (fromPos[1] < o.y - hh || fromPos[1] > o.y + hh) continue; }
+    else {
+      const t1 = (o.y - hh - fromPos[1]) / diry, t2 = (o.y + hh - fromPos[1]) / diry;
+      tmin = Math.max(tmin, Math.min(t1, t2)); tmax = Math.min(tmax, Math.max(t1, t2));
+      if (tmin > tmax) continue;
+    }
+    if (Math.abs(dirz) < 1e-8) { if (fromPos[2] < o.z - hd || fromPos[2] > o.z + hd) continue; }
+    else {
+      const t1 = (o.z - hd - fromPos[2]) / dirz, t2 = (o.z + hd - fromPos[2]) / dirz;
+      tmin = Math.max(tmin, Math.min(t1, t2)); tmax = Math.min(tmax, Math.max(t1, t2));
+      if (tmin > tmax) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+function localListenerPos() {
+  const v = new THREE.Vector3();
+  camera.getWorldPosition(v);
+  return [v.x, v.y, v.z];
+}
+
+function makePannerAt(pos) {
+  const panner = audioCtx.createPanner();
+  panner.panningModel = 'HRTF';
+  panner.distanceModel = 'inverse';
+  panner.refDistance = 10; // full volume out to ~10 units, then falls off — same "room-scale" feel as the local sfx
+  panner.maxDistance = 120; // roughly the map's own scale (the doubled arena+extension)
+  panner.rolloffFactor = 1.2;
+  panner.positionX.value = pos[0]; panner.positionY.value = pos[1]; panner.positionZ.value = pos[2];
+  return panner;
+}
+// A lowpass filter is ALWAYS in the chain (even a wide-open one when not occluded) rather than
+// conditionally inserted — swapping its cutoff/gain is one param write, cheaper and simpler
+// than rewiring the audio graph. Occluded: heavy lowpass + reduced gain — real walls absorb
+// high frequencies far more than low ones, so a muffled thump-through-a-wall reads as duller,
+// not just quieter, which pure gain reduction wouldn't capture.
+function applyOcclusionParams(filter, gainNode, baseGain, occluded) {
+  filter.frequency.value = occluded ? 900 : 20000;
+  gainNode.gain.value = occluded ? baseGain * 0.45 : baseGain;
+}
+function startPositionalSource(key, pos, gain, loop) {
+  const buffer = soundBuffers[key];
+  if (!buffer) return null;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buffer;
+  src.loop = loop;
+  const panner = makePannerAt(pos);
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  const g = audioCtx.createGain();
+  applyOcclusionParams(filter, g, gain, isOccludedBetween(localListenerPos(), pos));
+  src.connect(panner); panner.connect(filter); filter.connect(g); g.connect(audioCtx.destination);
+  src.start();
+  return { source: src, panner, filter, gainNode: g, gain };
+}
+// Returns the same trackable handle as the loop version (panner/filter/gainNode) — most
+// one-shot callers (explosions) just ignore it, but a one-shot can still be LONG (the grenade
+// tick clip is 3.657s) and the thing making the sound can keep moving for all of that, so a
+// caller that wants to keep its panner position (and occlusion) current over that time — see
+// updatePositionalTarget below, used for the grenade tick — needs a handle to update.
+function playPositionalOneShot(key, pos, gain = 1) {
+  return startPositionalSource(key, pos, gain, false);
+}
+function playPositionalLoopStart(key, pos, gain = 1) {
+  return startPositionalSource(key, pos, gain, true);
+}
+// Shared by the AKM's remote loop (repositioned on each incoming shotFired) and the grenade
+// tick (repositioned every frame to track the live grenade, see animate()) — just moves the
+// panner and re-runs the occlusion check against the new position.
+function updatePositionalTarget(entry, pos) {
+  entry.panner.positionX.value = pos[0]; entry.panner.positionY.value = pos[1]; entry.panner.positionZ.value = pos[2];
+  applyOcclusionParams(entry.filter, entry.gainNode, entry.gain, isOccludedBetween(localListenerPos(), pos));
+}
 
 function tone(freq, dur, type, gain, glideTo) {
   const t0 = audioCtx.currentTime;
@@ -230,7 +394,13 @@ function tone(freq, dur, type, gain, glideTo) {
   osc.connect(g); g.connect(audioCtx.destination);
   osc.start(t0); osc.stop(t0 + dur + 0.02);
 }
-function noiseBurst(dur, gain, filterFreq) {
+// `filterType` defaults to lowpass (a dull "thud"/boom — explosions, damage, the old
+// generic weapon sounds) — pump/reload mechanicals pass 'highpass' instead, which keeps only
+// the bright/metallic end of the noise, reading as a hard clack/click rather than a thump.
+// That's the actual fix for "the shotgun pump sounds cartoonish": the old version used plain
+// oscillator tones (smooth, tonal, no transient noise at all) for a sound that in real life is
+// pure percussive metal-on-metal contact — no clean pitch to it whatsoever.
+function noiseBurst(dur, gain, filterFreq, filterType) {
   const t0 = audioCtx.currentTime;
   const n = Math.floor(audioCtx.sampleRate * dur);
   const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
@@ -239,7 +409,7 @@ function noiseBurst(dur, gain, filterFreq) {
   const src = audioCtx.createBufferSource();
   src.buffer = buf;
   const filt = audioCtx.createBiquadFilter();
-  filt.type = 'lowpass';
+  filt.type = filterType || 'lowpass';
   filt.frequency.value = filterFreq || 2000;
   const g = audioCtx.createGain();
   g.gain.setValueAtTime(gain, t0);
@@ -247,21 +417,51 @@ function noiseBurst(dur, gain, filterFreq) {
   src.connect(filt); filt.connect(g); g.connect(audioCtx.destination);
   src.start(t0);
 }
+// Per-weapon gunshots use the provided recordings. Glock and Shotgun fire semi-auto (one
+// trigger pull, one shot) so their clip is just a normal one-shot play, restarted on every
+// `fire()` call — exactly like every other one-shot sfx here. The AKM is different: its
+// recording is a full automatic-fire spray (2.1s), not a single shot, so playing it fresh on
+// every `fire()` tick (every 110ms while held) would stack a dozen overlapping copies of the
+// same spray clip within one burst — instead it's started ONCE as a loop on mousedown and
+// stopped on mouseup (see the mousedown/mouseup handlers below), so `shoot()` does nothing at
+// all for the AKM; the continuous loop IS its firing sound.
 const sfx = {
   shoot(w) {
     if (w.type === 'melee') { tone(180, 0.06, 'square', 0.12, 90); return; }
-    if (w.pump) { noiseBurst(0.16, 0.34, 1700); tone(90, 0.14, 'sawtooth', 0.22, 40); return; }
-    noiseBurst(0.09, 0.22, 3200);
-    tone(140, 0.07, 'square', 0.14, 60);
+    if (w.id === 0) return; // AKM — handled by the looped spray clip, not per-shot
+    if (w.id === 1) { playBuffer('shotgunFire'); return; }
+    if (w.id === 2) { playBuffer('glockFire'); return; }
   },
-  pump() { tone(950, 0.03, 'square', 0.09); setTimeout(() => tone(600, 0.04, 'square', 0.1), 90); },
-  reload() { tone(500, 0.05, 'square', 0.08, 700); setTimeout(() => tone(700, 0.06, 'square', 0.08, 500), 140); },
+  pump() { playBuffer('shotgunPump'); },
+  // Per-weapon reload recordings — `reloadTime` in gameData.js was set to match each clip's
+  // real length exactly (AKM 3480ms, Shotgun 3792ms, Glock 2351ms) so the mechanical
+  // reload/UI-lockout window lines up with the sound, not a guessed duration.
+  reload(w) {
+    if (w && w.id === 0) { playBuffer('akmReload'); return; }
+    if (w && w.id === 1) { playBuffer('shotgunReload'); return; }
+    if (w && w.id === 2) { playBuffer('glockReload'); return; }
+  },
   empty() { tone(220, 0.045, 'square', 0.1); },
   hitMarker() { tone(1400, 0.04, 'square', 0.09); },
   damage() { noiseBurst(0.18, 0.16, 700); },
   grenadeThrow() { tone(260, 0.14, 'sine', 0.1, 120); },
-  grenadeTick() { tone(1200, 0.03, 'square', 0.05); },
-  explosion() { noiseBurst(0.5, 0.35, 900); tone(70, 0.4, 'sawtooth', 0.22, 30); },
+  // Positional, same as gunfire/explosions — a grenade only threatens players within its own
+  // blast radius, so a full-volume tick heard from across the map wasn't a meaningful warning
+  // for anyone it couldn't reach, just noise; the players who actually need to hear it are
+  // already well within refDistance. Started once per grenade (see syncGrenades) and then
+  // TRACKED — a thrown grenade can travel for its whole ~3.6s fuse, so a static position
+  // snapshot from the throw would read as coming from the wrong place by the time it's sitting
+  // on the ground about to go off; syncGrenades stores the returned handle on the grenade's own
+  // tracking object and animate() keeps its panner position current every frame, same object
+  // the visual mesh position already gets lerped from. GRENADE_FUSE_MS is set to this clip's
+  // exact 3657ms length so the explosion lands right as the ticking finishes, not mid-tick.
+  grenadeTick(pos) { return playPositionalOneShot('grenadeClock', pos); },
+  // 2x gain — the recording as provided reads quiet next to the rest of the mix.
+  // Positional now (not flat/global) — the blast happens at a world position distinct from
+  // where any given player currently stands (including the thrower, who may have moved off),
+  // so unlike your own gunfire this always goes through the panner/occlusion path. 2x gain
+  // (same boost as before) is the sound's OWN base loudness before distance falloff applies.
+  explosion(pos) { playPositionalOneShot('grenadeExplosion', pos, 2); },
   pickup() { tone(700, 0.07, 'sine', 0.12, 1100); setTimeout(() => tone(1100, 0.08, 'sine', 0.1, 1500), 70); },
   death() { tone(300, 0.3, 'sawtooth', 0.16, 60); },
 };
@@ -315,11 +515,20 @@ function parseDurationMin(hhmm) {
   return Math.max(0, parseInt(m[1], 10) * 60 + parseInt(m[2], 10));
 }
 
+// Defaults ON — the toggle only needs to be touched to turn memes OFF, not to opt in.
+let memeModeOn = true;
+memeModeToggle.addEventListener('click', () => {
+  memeModeOn = !memeModeOn;
+  memeModeToggle.textContent = memeModeOn ? 'ON' : 'OFF';
+  memeModeToggle.classList.toggle('on', memeModeOn);
+  memeModeToggle.classList.toggle('off', !memeModeOn);
+});
+
 createBtn.addEventListener('click', () => {
   sendMsg({ type: 'hello', name: currentName() });
   const rn = (roomNameInput.value || 'Ruins Match').trim().slice(0, 24) || 'Ruins Match';
   const durationMin = parseDurationMin(matchDurationInput.value);
-  sendMsg({ type: 'createRoom', roomName: rn, map: mapSelect.value || DEFAULT_MAP, durationMin });
+  sendMsg({ type: 'createRoom', roomName: rn, map: mapSelect.value || DEFAULT_MAP, durationMin, memeMode: memeModeOn });
 });
 
 matchEndQuitBtn.addEventListener('click', () => { location.reload(); });
@@ -829,13 +1038,13 @@ function buildIvyTexture() {
   return new THREE.CanvasTexture(c);
 }
 
-function initScene(mapKey) {
+function initScene(mapKey, memeMode) {
   if (sceneReady) return;
   sceneReady = true;
   const theme = MAPS[mapKey]?.theme || MAPS[DEFAULT_MAP].theme;
   const dusk = theme === 'dusk';
 
-  const layout = getMapLayout(mapKey);
+  const layout = getMapLayout(mapKey, memeMode);
   ACTIVE_WALLS = layout.walls;
   ACTIVE_PLATFORMS = layout.platforms;
   ACTIVE_RAMPS = layout.ramps;
@@ -1171,23 +1380,20 @@ function syncGrenades(list) {
       const light = new THREE.PointLight(0xff3300, 0.7, 3.5);
       mesh.add(light);
       scene.add(mesh);
-      gm = { mesh, targetPos: new THREE.Vector3() };
+      gm = { mesh, targetPos: new THREE.Vector3(), tick: null };
       grenadeMeshes.set(g.id, gm);
+      // The full ticking-clock clip, once, the instant a grenade (yours or anyone else's)
+      // first appears — GRENADE_FUSE_MS is set to this clip's exact length so it finishes
+      // right as the server detonates it, not a repeating short beep for as long as any
+      // grenade is live like before. The returned handle is kept on `gm` so animate() can keep
+      // its panner tracking the grenade's live position for the rest of the tick's ~3.6s.
+      gm.tick = sfx.grenadeTick(g.pos);
     }
     gm.targetPos.set(g.pos[0], g.pos[1], g.pos[2]);
   }
   for (const [id, gm] of grenadeMeshes) {
     if (!seen.has(id)) { scene.remove(gm.mesh); grenadeMeshes.delete(id); }
   }
-}
-
-// A simple global ticking cue (not per-grenade distance-based) while any grenade is live
-// anywhere in the room — a clear, unmissable "something's about to go off" warning.
-let grenadeTickTimer = 0;
-function updateGrenadeTicking(dt) {
-  if (grenadeMeshes.size === 0) { grenadeTickTimer = 0; return; }
-  grenadeTickTimer -= dt;
-  if (grenadeTickTimer <= 0) { sfx.grenadeTick(); grenadeTickTimer = 0.3; }
 }
 
 // ---------- Pickups: floating rotating markers, distinct per type/caliber so you can tell
@@ -1297,7 +1503,7 @@ function smokeSpriteTexture() {
 const smokeTex = smokeSpriteTexture();
 
 function spawnExplosion(pos) {
-  sfx.explosion();
+  sfx.explosion(pos);
   // bright blast flash — additive, expands and fades fast
   const flashMat = new THREE.SpriteMaterial({
     map: muzzleFlash.material.map, transparent: true, depthTest: false, blending: THREE.AdditiveBlending, opacity: 1,
@@ -1365,6 +1571,46 @@ function spawnExplosion(pos) {
   }
 }
 
+// ---------- Remote gunfire (positional) ----------
+// Server broadcasts one `shotFired` per shot any OTHER player takes (see server/index.js's
+// handleAttack) — never for the local player's own shots, those already play locally the
+// instant fire() runs. Glock/Shotgun are one-shot plays per message, same as their local sound.
+// The AKM needs different handling here too, same reason as the local loop (batch 35): its clip
+// is a continuous spray, not a single shot, and the server sends a fresh shotFired roughly
+// every fireInterval (110ms) for as long as that player holds the trigger. One looping
+// BufferSource is started per shooter on their FIRST shot and just kept alive/repositioned by
+// each subsequent one — a timeout (slightly longer than fireInterval) stops it automatically
+// once shots stop arriving, which naturally covers them releasing the trigger, dying, or
+// disconnecting without needing separate handling for any of those.
+const remoteGunLoops = new Map(); // shooter playerId -> { source, panner, filter, gainNode, gain, timeoutId }
+function stopRemoteGunLoop(playerId) {
+  const entry = remoteGunLoops.get(playerId);
+  if (!entry) return;
+  try { entry.source.stop(); } catch { /* already finished */ }
+  clearTimeout(entry.timeoutId);
+  remoteGunLoops.delete(playerId);
+}
+function handleRemoteShot(msg) {
+  const w = WEAPONS[msg.weapon];
+  if (!w) return;
+  if (w.id === 0) {
+    let entry = remoteGunLoops.get(msg.playerId);
+    if (!entry) {
+      const started = playPositionalLoopStart('akmFire', msg.pos, 1);
+      if (!started) return;
+      entry = { ...started, timeoutId: null };
+      remoteGunLoops.set(msg.playerId, entry);
+    } else {
+      updatePositionalTarget(entry, msg.pos);
+    }
+    clearTimeout(entry.timeoutId);
+    entry.timeoutId = setTimeout(() => stopRemoteGunLoop(msg.playerId), 220);
+    return;
+  }
+  if (w.id === 1) { playPositionalOneShot('shotgunFire', msg.pos); return; }
+  if (w.id === 2) { playPositionalOneShot('glockFire', msg.pos); return; }
+}
+
 // ---------- Message handling ----------
 function handleMessage(msg) {
   switch (msg.type) {
@@ -1406,6 +1652,9 @@ function handleMessage(msg) {
       break;
     case 'grenadeExploded':
       spawnExplosion(msg.pos);
+      break;
+    case 'shotFired':
+      handleRemoteShot(msg);
       break;
     case 'pickup':
       if (msg.kind === 'health') {
@@ -1482,7 +1731,7 @@ function onJoined(msg) {
   matchOver = false;
   matchTimer.hidden = !matchEndsAt;
 
-  initScene(msg.map || DEFAULT_MAP);
+  initScene(msg.map || DEFAULT_MAP, msg.memeMode !== false);
   playerX = msg.players.find((p) => p.id === localId)?.pos[0] ?? 0;
   playerZ = msg.players.find((p) => p.id === localId)?.pos[2] ?? 0;
   eyeHeight = STAND_EYE_HEIGHT;
@@ -1672,6 +1921,11 @@ let currentWeapon = 0;
 function setWeapon(idx) {
   if (idx < 0 || idx >= WEAPONS.length) return;
   cancelReload(); // switching weapons drops any in-progress reload, no ammo change
+  // Switching away from the AKM mid-hold (mouse still down) would otherwise leave its spray
+  // loop playing forever under whatever weapon you switch to — stop both the loop and the
+  // stale fire interval so switching weapons always leaves audio in a consistent state.
+  if (fireIntervalId) { clearInterval(fireIntervalId); fireIntervalId = null; }
+  stopAkmLoop();
   currentWeapon = idx;
   for (let i = 0; i < viewmodels.length; i++) viewmodels[i].visible = i === idx;
   updateWeaponBar();
@@ -1691,7 +1945,7 @@ function reload() {
   if (a.reserve <= 0) { sfx.empty(); return; }
   const now = performance.now();
   reloadState = { idx: currentWeapon, startedAt: now, endsAt: now + w.reloadTime, duration: w.reloadTime };
-  sfx.reload();
+  sfx.reload(w);
   const ring = weaponCardEls[currentWeapon].querySelector('.reloadRing');
   if (ring) ring.hidden = false;
 }
@@ -1724,14 +1978,34 @@ function updateReload() {
 }
 
 let fireIntervalId = null;
+// The AKM's spray-clip loop — started on mousedown, stopped on mouseup/empty-mag/weapon-switch.
+// Every stop path calls this same helper so there's exactly one place that can leave it
+// playing by mistake, not three copies of "if akmLoopSource, .stop() it" to keep in sync.
+let akmLoopSource = null;
+function stopAkmLoop() {
+  if (!akmLoopSource) return;
+  try { akmLoopSource.stop(); } catch { /* already finished on its own */ }
+  akmLoopSource = null;
+}
 document.addEventListener('mousedown', (e) => {
   if (!pointerLocked || e.button !== 0) return;
-  fire();
   const w = WEAPONS[currentWeapon];
-  if (w.auto) fireIntervalId = setInterval(fire, w.fireInterval);
+  // Checked BEFORE fire() runs, not after — this has to be "was there a bullet to fire",
+  // not "is the mag still non-empty now": firing the LAST bullet legitimately drops the mag
+  // to 0 inside fire() itself, and since the AKM's sfx.shoot() does nothing (the loop below IS
+  // its sound), checking ammo after fire() would skip starting the loop for that final shot
+  // and it'd fire completely silently. Checked before, an empty mag correctly never starts the
+  // interval/loop at all — this used to unconditionally start both regardless of fire()'s
+  // outcome, so clicking an already-empty AKM leaked the spray-loop clip for ~110ms (one tick)
+  // before the interval's next fire() call caught the still-empty mag and stopped it.
+  const hadAmmo = w.magSize == null || ammo[currentWeapon].mag > 0;
+  fire();
+  if (w.auto && hadAmmo) fireIntervalId = setInterval(fire, w.fireInterval);
+  if (w.id === 0 && hadAmmo) akmLoopSource = playBuffer('akmFire', { loop: true });
 });
 document.addEventListener('mouseup', () => {
   if (fireIntervalId) { clearInterval(fireIntervalId); fireIntervalId = null; }
+  stopAkmLoop();
 });
 
 let lastLocalFire = 0;
@@ -1748,6 +2022,7 @@ function fire() {
     if (a.mag <= 0) {
       sfx.empty();
       if (fireIntervalId) { clearInterval(fireIntervalId); fireIntervalId = null; }
+      stopAkmLoop();
       return;
     }
     a.mag -= 1;
@@ -2039,6 +2314,7 @@ function animate() {
   const dt = Math.min(0.05, clock.getDelta());
   if (pointerLocked && localAlive) updateMovement(dt);
   if (sceneReady) updateViewmodelKick(dt);
+  if (sceneReady) updateAudioListener();
   for (const rp of remotePlayers.values()) {
     rp.mesh.position.lerp(rp.targetPos, Math.min(1, dt * 10));
     let dr = rp.targetRotY - rp.mesh.rotation.y;
@@ -2048,9 +2324,21 @@ function animate() {
   }
   for (const gm of grenadeMeshes.values()) {
     gm.mesh.position.lerp(gm.targetPos, Math.min(1, dt * 12));
+    if (gm.tick) {
+      const p = gm.mesh.position;
+      gm.tick.panner.positionX.value = p.x; gm.tick.panner.positionY.value = p.y; gm.tick.panner.positionZ.value = p.z;
+      // Repositioning every frame is cheap (3 AudioParam writes); the occlusion raycast isn't
+      // free (O(wall count)), so it's throttled to ~5-6 times/sec instead of every frame —
+      // plenty responsive for a grenade rolling past a corner, not wasted on frames where
+      // nothing's changed enough to matter.
+      const now = performance.now();
+      if (now - (gm.tickOcclusionCheckedAt || 0) > 180) {
+        gm.tickOcclusionCheckedAt = now;
+        applyOcclusionParams(gm.tick.filter, gm.tick.gainNode, gm.tick.gain, isOccludedBetween(localListenerPos(), [p.x, p.y, p.z]));
+      }
+    }
   }
   updateTrajectoryPreview();
-  updateGrenadeTicking(dt);
   animatePickups(dt);
   updateReload();
   if (sceneReady) drawMinimap();

@@ -342,6 +342,15 @@ function handleAttack(player, room, weaponIdx, origin, dir) {
   if (now - (player.lastFire[weaponIdx] || 0) < weapon.fireInterval) return;
   player.lastFire[weaponIdx] = now;
 
+  // Broadcast to everyone else in the room so their client can play a positional gunshot sound
+  // (see handleRemoteShot in client.js) — this is the ONLY reason this exists; hit resolution
+  // below doesn't need it. Ranged only (melee has no recorded sound to spatialize), and never
+  // sent back to the shooter — they already played their own sound locally the instant they
+  // fired, no round-trip needed for that.
+  if (weapon.type === 'ranged') {
+    broadcastRoom(room, { type: 'shotFired', playerId: player.id, weapon: weaponIdx, pos: origin }, player.id);
+  }
+
   const d = vecNorm(dir);
   const wallDist = Math.min(weapon.range, nearestObstacleDist(origin, d, room.physicsObstacles));
   const hitRadius = weapon.type === 'melee' ? PLAYER_RADIUS + 0.6 : PLAYER_RADIUS;
@@ -562,7 +571,11 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'createRoom') {
       const map = MAPS[msg.map] ? msg.map : DEFAULT_MAP;
-      const room = { id: makeRoomId(), name: String(msg.roomName || 'Ruins Match').slice(0, 24), map, players: new Map(), leftStats: new Map() };
+      // Only the client actually renders decor (posters/banners/ivy) — this is stored purely
+      // to hand back to every joining client via the `joined` message so they all render the
+      // same thing, not used in any server-side collision/physics call.
+      const memeMode = msg.memeMode !== false;
+      const room = { id: makeRoomId(), name: String(msg.roomName || 'Ruins Match').slice(0, 24), map, memeMode, players: new Map(), leftStats: new Map() };
       // Each room now gets its own map layout (the core arena + that theme's colored
       // extension) instead of a single shared global obstacle list — walls+platforms combined
       // is exactly what the raycasting functions (bullets, grenade LOS, grenade wall bounce)
@@ -695,6 +708,7 @@ function joinRoom(ws, room) {
     roomId: room.id,
     roomName: room.name,
     map: room.map,
+    memeMode: room.memeMode !== false,
     matchEndsAt: room.matchEndsAt || null,
     playerId: player.id,
     weapons: WEAPONS,

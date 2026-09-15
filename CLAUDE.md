@@ -1320,3 +1320,244 @@ instruction.
 **This finishes the meme-poster project** — all 12 of the user's images are now placed
 somewhere in the game: 5 on the ruined houses (batch 28/30), 2 in the mansion (batch 26/31),
 and these last 6 across the original core arena.
+
+## Batch 34 (2026-09-15): DONE — distinct per-weapon gunshot/reload sounds, and a Meme Mode toggle
+
+Two unrelated asks in one batch.
+
+**1. Weapon sounds.** Everything in this game's audio is synthesized with WebAudio, no asset
+files (explicit design decision from early in the project) — there's no audio pipeline to drop
+downloaded "stock" sound files into, so this was done by making the SYNTHESIS itself sound like
+the real thing per weapon, rather than sourcing recordings. Flagging this reading clearly in
+case real recorded audio files were actually wanted instead — that would need a new
+asset-loading path (`<audio>`/decoded buffers), which doesn't exist yet.
+
+Two real bugs found before fixing anything:
+- AKM and Glock's firing sound was the exact same `noiseBurst`+`tone` call — `sfx.shoot(w)`
+  only branched on `w.type === 'melee'` and `w.pump`, so every non-melee non-pump weapon (both
+  rifle and pistol) fell through to one shared "generic gun" sound. Fixed by dispatching on
+  `w.id` instead, with each weapon's sound shaped to its real character: AKM sharp crack + real
+  mid-bass punch, Glock short/bright pop with almost no low end, Shotgun (already had its own
+  branch) widened into a genuinely deep, dark boom.
+- The shotgun's pump-action "cha-chk" (`sfx.pump()`) was two plain oscillator tones
+  (`tone(950)` → `tone(600)`) — a clean two-note beep, which is exactly what reads as
+  "cartoonish": real pump-action racking is pure percussive metal-on-metal contact with no
+  clean pitch to it at all. Extended the shared `noiseBurst()` helper with an optional
+  `filterType` param (defaults to the existing lowpass "thud" behavior, so every other call site
+  is untouched) and used `'highpass'` for pump/reload mechanicals — keeps only the bright,
+  metallic end of filtered noise, reading as a real clack instead of a synth note.
+- Reload was also one generic sound for all three guns before this — now per-weapon: AKM
+  (mag drop → mag in → bolt-release chunk), Shotgun (4 evenly-spaced shell-loading clacks across
+  the reload, matching its tube-fed pump-action reload style), Glock (same idea as the rifle,
+  tighter/quicker timing matching its shorter `reloadTime`).
+
+**2. Meme Mode toggle.** A toggle on the Create Room panel (`index.html`) — green "ON" /
+red "OFF" button, defaults ON — controls whether the 13 meme posters (5 houses, 2 mansion, 6
+arena, see batches 26-31/33) render at all for that room.
+
+Threaded through as a real per-room setting, not a client-only cosmetic flag (so everyone in
+the room sees the same thing): `createRoom` message now carries `memeMode`; the room stores it
+and echoes it back in the `joined` message; `getMapLayout(mapKey, memeMode = true)` filters the
+final decor list down to `d => !d.img` when memes are off. `img` turned out to be the exact,
+already-unique marker for "this is a meme photo poster" — every other decor entry
+(crenellations, door panels, banners, ivy) uses `color` or `type` instead, so this filter needs
+no new tagging and can't accidentally catch a non-meme decoration. Server-side collision/physics
+is completely untouched — `getMapLayout`'s `walls`/`platforms`/`ramps` never depended on decor,
+confirmed by checking every server call site uses only those three fields.
+
+Verified before deploying: `getMapLayout('city', false)` returns exactly 0 poster entries (13
+fewer than `true`/default), walls/ramps/platforms identical either way, spawn/pickup sweep
+clean under memeMode:false too. Then a REAL end-to-end test, not just unit-level: a small `ws`
+client script connecting to the live server, sending `createRoom` with `memeMode:false`,
+confirming the `joined` reply actually carries `memeMode:false` back — and a second run with the
+field omitted entirely, confirming it defaults to `true`. Syntax-checked all three touched files
+(`gameData.js`, `client.js`, `server/index.js`) locally and on remote, pm2 restarted clean
+(twice — once after deploying, once more after the two test rooms to clear them from the
+in-memory room list). Not browser-tested per standing instruction — the gunshot/reload sound
+character specifically is the kind of thing that benefits from an actual listen.
+
+## Batch 35 (2026-09-15): DONE — real recorded gunshot/reload/grenade audio, replacing synthesis for those
+
+User provided 9 real trimmed mp3 clips (`gun-sounds/` locally): akm-fire, akm-reload,
+glock-fire, glock-reload, shotgun-fire, shotgunpump, shotgun-reload, grenade-clock,
+grenade-explosion. This is a real architecture change — every sound in this game had been
+100% WebAudio synthesis until now (explicit original design decision) — so a new audio-loading
+path was added rather than reusing anything: `SOUND_FILES` (client.js) maps short keys to
+`/sounds/*.mp3` URLs, each fetched + `decodeAudioData`'d into a cached `AudioBuffer` once at
+page load; `playBuffer(key, {gain, loop})` spins up a fresh `BufferSource`+`GainNode` per play
+(so the same clip can overlap itself — two grenades ticking at once, rapid glock taps — with no
+extra bookkeeping) and returns the source so a looping one can be stopped early. Files uploaded
+to `public/sounds/` on the remote (served automatically, same `express.static` mount as
+`public/images/`).
+
+**AKM needed different handling than Glock/Shotgun, and this was explicit in the ask:** Glock
+and Shotgun fire semi-auto — one recording, one trigger pull, replayed fresh on every `fire()`
+call, same as any other one-shot sfx. The AKM's clip (`akm-fire.mp3`, 2.14s) is a full
+automatic-fire SPRAY, not a single shot — playing it fresh on every 110ms `fire()` tick would
+stack a dozen overlapping copies within one burst. Instead it's started ONCE as a `loop:true`
+BufferSource on mousedown (only when `w.id === 0`) and stopped on mouseup — `sfx.shoot()` does
+nothing at all for the AKM now, the loop IS its firing sound. Added a single `stopAkmLoop()`
+helper called from every path that should end it (mouseup, mag-empty, and — a real gap this
+closed — switching weapons mid-hold via `setWeapon()`, which used to leave both the fire
+interval AND now the spray loop running under whatever you switched to).
+
+**Reload timing now comes from the actual clips, not a guessed value:** measured each reload
+recording's exact length with `mutagen` (Python) — AKM 3480ms, Shotgun 3792ms, Glock 2351ms —
+and set `reloadTime` in `gameData.js` to those exact numbers, replacing the old
+guessed-at-typical-shooter-game values (2400/3000/1600). This is what makes the mechanical
+reload lockout/UI ring duration actually line up with the sound instead of ending early or
+leaving dead air.
+
+**Grenade timing, the trickiest sync of the three:** the OLD ticking system played a short
+synthesized beep every 0.3s for as long as any grenade was live — replaced entirely with a
+ONE-SHOT play of the full `grenade-clock.mp3` (3.657s) the instant a grenade (yours or another
+player's) first appears in `syncGrenades`, not a repeating cue. `GRENADE_FUSE_MS` (server-
+authoritative — the actual detonation timer, `server/index.js`) was 1600ms; changed to 3657ms
+to match the clip exactly, so the explosion (server-broadcast `grenadeExploded`, which already
+fires the visual flash and `sfx.explosion()` together, already correctly simultaneous) lands
+right as the ticking finishes rather than mid-tick or with a long silent gap after. Explosion
+gain set to 2x per "it's too low."
+
+**Verified before deploying:** every clip's exact duration measured via `mutagen`, not
+eyeballed or guessed from listening. `node --check` on both touched files (`gameData.js`,
+`client.js`). Confirmed `GRENADE_FUSE_MS` and all 3 `reloadTime`s read back correctly from a
+fresh import. Confirmed map layout (walls/decor counts) unaffected — this batch only touches
+weapon data + audio, no geometry. All 9 uploaded sound files reachable (curl 200 each) and the
+deployed code's key pieces (`SOUND_FILES`, `playBuffer`, `akmLoopSource`/`stopAkmLoop`, the
+updated `reloadTime`s and `GRENADE_FUSE_MS`) grep-confirmed live on the remote. pm2 restarted
+clean. Not browser-tested per standing instruction — actual audio playback, timing feel, and
+whether 2x explosion gain clips/distorts are exactly the kind of thing that needs a real
+listen, flagging clearly rather than claiming confidence there.
+
+## Batch 36 (2026-09-15): DONE — fixed AKM spray-loop leaking on an empty mag
+
+User feedback: clicking an already-empty AKM repeatedly leaked a brief instance of the spray
+loop sound instead of just the empty buzz.
+
+Real bug, not a mishear: `fire()` already correctly handled an empty mag (plays `sfx.empty()`,
+returns without firing) but the `mousedown` handler unconditionally started BOTH `fireIntervalId`
+and the AKM's looping spray clip (`akmLoopSource`) regardless of what `fire()` had just done.
+Clicking an empty AKM: `fire()` plays the empty buzz and returns, then the handler still kicked
+off the loop anyway — it played for about one interval tick (~110ms, `fireInterval`) before the
+NEXT `fire()` call (from the interval it also shouldn't have started) caught the still-empty mag
+and stopped both. That ~110ms is exactly the "leaks... for an instance" the user described.
+
+Fixed by checking ammo and gating both the interval and the loop on it. Important detail: the
+check has to happen BEFORE `fire()` runs, not after — firing the LAST bullet legitimately drops
+the mag to 0 inside `fire()` itself, and since the AKM's `sfx.shoot()` intentionally does
+nothing (the loop IS its firing sound, see batch 35), checking ammo AFTER `fire()` would have
+skipped starting the loop for that final shot and made it fire completely silently — a new bug
+the naive fix would have introduced. Checked before, an empty mag correctly never starts either
+the interval or the loop, and a mag with exactly one bullet left still gets its shot's sound
+(loop starts, plays until the next tick discovers the mag is now empty and stops it via the
+existing `stopAkmLoop()` call already inside `fire()`'s empty branch).
+
+Verified with a standalone simulation replicating the exact state machine (not just read
+through the code): empty-mag click → only the empty buzz, no loop start; last-bullet click →
+shot fires, loop starts, next tick correctly empties and stops it; rapid spam-clicking on an
+empty mag → empty buzz every time, zero leaks across 4 consecutive clicks. Syntax-checked,
+deployed, grep-verified the fix is live, pm2 restarted clean.
+
+## Batch 37 (2026-09-15): DONE — real 3D positional audio for remote gunfire + explosions, with wall occlusion
+
+User asked (after a scoping discussion) for BGMI-style spatial audio: enemy gunfire/explosions
+audible with real distance falloff and directional (left/right/front/back) panning, plus wall
+muffling, done in an "optimized way."
+
+**Confirmed gap before building anything:** grenade explosions were already broadcast
+room-wide with a position, but gunfire from OTHER players wasn't audible AT ALL — the server
+only ever broadcast a `hit` message when a shot actually connected, never "a shot was fired."
+This needed a real new server event, not just client-side audio work.
+
+**Server (`server/index.js`):** `handleAttack` now broadcasts `{type:'shotFired', playerId,
+weapon, pos}` to every other player in the room (never echoed back to the shooter — they
+already hear their own shot locally, no round-trip needed) right after the existing
+per-weapon rate-limit check passes, so it's naturally throttled to real shots only. Ranged
+weapons only (melee has no recorded sound to spatialize).
+
+**Client (`client.js`) — new positional audio layer, additive, doesn't touch the LOCAL
+player's own sounds (still flat/non-positional, correctly — your own gun is always right at
+your ears):**
+- `audioCtx.listener` (HRTF panning mode) is kept synced to the camera's live world position
+  and facing direction every frame (`updateAudioListener()`, hooked into `animate()`).
+- `isOccludedBetween(fromPos, toPos)`: a ray-segment-vs-AABB occlusion test against
+  `ACTIVE_WALLS` — the SAME list that already blocks bullets, invisible collision-only pieces
+  (mansion roof extensions etc.) included, so "behind a wall" here matches what actually blocks
+  a shot rather than being a separate approximation. Verified against 6 known-geometry cases
+  (opposite sides of a wall, same side, above the wall's height, outside its width, a segment
+  that doesn't reach it, a diagonal path through it) before trusting it — all 6 came back
+  correct.
+- Occlusion doesn't just cut volume — it ALSO applies a heavy lowpass filter (always in the
+  signal chain, params swapped rather than the graph rewired) since real walls absorb high
+  frequencies far more than low ones; volume-only would read as "quieter", this reads as
+  "muffled", which is the actual ask.
+- `playPositionalOneShot`/`playPositionalLoopStart` wrap a `BufferSource` in a
+  `PannerNode → BiquadFilterNode → GainNode` chain, `refDistance:10, maxDistance:120,
+  rolloffFactor:1.2` tuned to the map's own scale.
+- Glock/Shotgun remote shots are simple one-shot positional plays per `shotFired` message,
+  matching their semi-auto nature. The AKM needed the same special handling as its LOCAL sound
+  (batch 35/36): its clip is a continuous spray, not a single shot, and the server sends a
+  fresh `shotFired` roughly every 110ms while a remote player holds the trigger — playing the
+  full clip fresh each time would stack ~19 overlapping copies in a 2-second burst. Instead one
+  looping source is started per shooter on their first shot, repositioned/re-occlusion-checked
+  on each subsequent one, and a 220ms timeout (a bit longer than `fireInterval`) auto-stops it
+  once shots stop arriving — this one mechanism transparently covers releasing the trigger,
+  dying, or disconnecting, no separate cleanup needed for any of those.
+- `spawnExplosion`/`sfx.explosion(pos)` now goes through the same positional path (2x gain
+  preserved from batch 35) — explosions happen at a world position distinct from any player's
+  current location (including the thrower, who may have moved off), so unlike gunfire this
+  applies to ALL players uniformly, not just "everyone but the source."
+- Deliberately left the grenade TICKING sound (`grenadeClock`) flat/global, not positional —
+  the user's ask was specifically gunfire + explosions; making the tick distance-limited would
+  be a gameplay-balance change (losing it as an always-audible warning), not just an audio
+  quality one, so out of scope here without being asked.
+
+**"Optimized way," specifically:** the occlusion test itself is O(wall count) (~150) per call,
+negligible — the actual optimization is WHEN it runs: once per one-shot sound, and for the
+AKM's loop, re-checked only on each incoming `shotFired` tick (~9/sec while held) rather than
+every render frame (60/sec) or continuously.
+
+**Verified before deploying, live against the running server, not just code review:** a
+two-client `ws` test script — one creates a room and fires, a second joins the same room and
+confirms it actually receives `shotFired` with the correct weapon/position; a second test
+confirmed the shooter itself never gets an echo of its own shot. Both passed on the first try
+against the real server. Occlusion math verified with 6 standalone geometry cases beforehand.
+Syntax-checked all three files, pm2 restarted clean (twice — once after deploying, once more
+after the test rooms to clear them). Not browser-tested per standing instruction — the actual
+perceived panning/falloff/muffling character is exactly the kind of thing that needs a real
+listen on headphones, which the user asked to do themselves.
+
+## Batch 38 (2026-09-15): DONE — grenade ticking joins the positional audio system
+
+Follow-up to batch 37. User asked directly why the ticking sound was left flat/global while
+gunfire and explosions became positional. On reflection the original reasoning ("it's an
+always-audible warning, changing that is a gameplay call") didn't actually hold up: a grenade
+only threatens players within its own blast radius, so a full-volume tick heard from anywhere
+on the map isn't a meaningful warning for players it can't reach — it's just noise. The players
+who genuinely need to hear it are already well within `refDistance` (10 units), so making it
+positional doesn't lose the warning where it matters, and fixes the actual inconsistency of
+having one flat sound in an otherwise spatial audio system.
+
+**Implementation, not just a flip of a flag:** a thrown grenade travels for its whole ~3.6s
+fuse (arc + bounces, server-simulated), so a static position snapshot from the moment it's
+thrown would be meaningfully wrong by the time it's sitting on the ground about to detonate —
+this needed live position tracking, not a one-time position at start. Refactored the positional
+audio helpers (`playPositionalOneShot`/`playPositionalLoopStart`) onto a shared
+`startPositionalSource()` so both return the same trackable handle (`panner`, `filter`,
+`gainNode`); `sfx.grenadeTick(pos)` now returns that handle, stored on the grenade's own
+tracking object (`gm.tick` in `syncGrenades`) alongside its visual mesh. `animate()`'s existing
+per-frame grenade-position lerp loop (already updating the visual mesh) now also pushes that
+same live position into the tick's panner every frame — free-riding on a loop that already
+runs, not new per-frame work — while the heavier occlusion raycast is throttled to ~180ms
+(5-6 times/sec) rather than run on every frame, consistent with the "optimized way" instruction
+from batch 37.
+
+Renamed `updatePositionalLoop` → `updatePositionalTarget` since it's now shared by both the
+AKM's remote spray loop (batch 37) and the grenade tick tracking — same "move the panner,
+re-check occlusion" operation, same helper either way.
+
+Verified before deploying: syntax-checked, grep-confirmed every piece (the renamed helper, the
+`gm.tick` handle, the throttled occlusion check, the new `grenadeTick(pos)` signature) is live
+on the remote, pm2 restarted clean. This completes the "gunfire, explosions, and now grenade
+ticking all use real distance falloff + directional panning + wall occlusion" system requested
+across batches 37-38 — ready for the user's own headphone test.

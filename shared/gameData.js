@@ -8,12 +8,14 @@
 // /images) takes priority over the `icon` emoji fallback. `ammoImage` is a *separate* photo
 // used as a small texture/label on the in-world 3D ammo pickup box (not a flat sprite — it
 // stays real box geometry, the photo just decorates one face), null where no photo exists yet.
-// `reloadTime` (ms, null for melee) is how long a full reload takes — standard shooter-game
-// values: rifle mag change ~2.4s, pump-action shotgun tube reload ~3s (slower), pistol ~1.6s.
+// `reloadTime` (ms, null for melee) is how long a full reload takes — set to the EXACT length
+// of each weapon's real reload sound clip (see client.js's SOUND_FILES / gun-sounds), not a
+// guessed shooter-game value anymore, so the mechanical reload/UI-lockout window lines up with
+// the recording: AKM 3480ms, Shotgun 3792ms, Glock 2351ms (measured via mutagen, not eyeballed).
 export const WEAPONS = [
-  { id: 0, name: 'AKM',     icon: '🔫', image: 'akm.png',    ammoImage: 'ammo_762.png', type: 'ranged', damage: 16, fireInterval: 110, range: 70,  auto: true,  pump: false, magSize: 30, reserveMax: 180, pickupAmount: 120, caliber: '7.62mm', reloadTime: 2400 },
-  { id: 1, name: 'Shotgun', icon: '💥', image: 'shotgun.png', ammoImage: 'ammo_12ga.png', type: 'ranged', damage: 60, fireInterval: 850, range: 28,  auto: false, pump: true,  magSize: 6,  reserveMax: 30,  pickupAmount: 18,  caliber: '12ga', reloadTime: 3000 },
-  { id: 2, name: 'Glock',   icon: '🔫', image: 'glock.png',  ammoImage: 'ammo_9mm.png', type: 'ranged', damage: 14, fireInterval: 230, range: 50,  auto: false, pump: false, magSize: 12, reserveMax: 72,  pickupAmount: 60,  caliber: '9mm', reloadTime: 1600 },
+  { id: 0, name: 'AKM',     icon: '🔫', image: 'akm.png',    ammoImage: 'ammo_762.png', type: 'ranged', damage: 16, fireInterval: 110, range: 70,  auto: true,  pump: false, magSize: 30, reserveMax: 180, pickupAmount: 120, caliber: '7.62mm', reloadTime: 3480 },
+  { id: 1, name: 'Shotgun', icon: '💥', image: 'shotgun.png', ammoImage: 'ammo_12ga.png', type: 'ranged', damage: 60, fireInterval: 850, range: 28,  auto: false, pump: true,  magSize: 6,  reserveMax: 30,  pickupAmount: 18,  caliber: '12ga', reloadTime: 3792 },
+  { id: 2, name: 'Glock',   icon: '🔫', image: 'glock.png',  ammoImage: 'ammo_9mm.png', type: 'ranged', damage: 14, fireInterval: 230, range: 50,  auto: false, pump: false, magSize: 12, reserveMax: 72,  pickupAmount: 60,  caliber: '9mm', reloadTime: 2351 },
   { id: 3, name: 'Combat Knife', icon: '🔪', image: null,    ammoImage: null,          type: 'melee',  damage: 55, fireInterval: 450, range: 3.2, auto: false, pump: false, magSize: null, reserveMax: null, pickupAmount: 0, caliber: null, reloadTime: null },
 ];
 
@@ -46,7 +48,10 @@ export const SPAWN_POINTS = [
 export const SPAWN_SAFE_DIST = 9;
 
 export const GRENADE_COOLDOWN_MS = 4000;
-export const GRENADE_FUSE_MS = 1600;
+// Set to the exact length of grenade-clock.mp3 (measured via mutagen: 3.657s), not a guessed
+// gameplay value — the ticking clip plays once on throw (see syncGrenades, client.js) and this
+// is what makes the server-authoritative explosion land right as it finishes, not mid-tick.
+export const GRENADE_FUSE_MS = 3657;
 export const GRENADE_THROW_SPEED = 16;
 export const GRENADE_BLAST_RADIUS = 8;
 export const GRENADE_LETHAL_RADIUS = 3; // inside this, a grenade is a guaranteed one-shot kill
@@ -628,7 +633,7 @@ const EXTENSION_GRASS = [
 // (see surfaceHeightAt in client.js) but are ALSO folded into the physics obstacle list
 // server-side so shots/grenades can't pass through a floor slab; `decor`/`grass` are purely
 // visual, client-only, never collidable.
-export function getMapLayout(mapKey) {
+export function getMapLayout(mapKey, memeMode = true) {
   const color = mapKey === 'ruins' ? 0xb08d4a : 0x8a8d8f; // mud-yellow vs concrete-gray
   const bunkerColor = mapKey === 'ruins' ? 0x9c8256 : 0x7a7d7a;
   const mansionColor = mapKey === 'ruins' ? 0xc9a06a : 0xa8a49c; // richer sandstone vs pale stone
@@ -649,7 +654,13 @@ export function getMapLayout(mapKey) {
     // rooftop) so that correspondence holds for every ramp, houses' and mansion's alike.
     platforms: [...houses.map((h) => h.platform), mansion.platform, mansion.platform],
     ramps: [...houses.map((h) => h.ramp), ...mansion.ramps],
-    decor: [...houses.flatMap((h) => h.decor), ...mansion.decor, ...ARENA_POSTERS],
+    // `img` is the exact marker for "this is a meme photo poster" — every other decor entry
+    // (crenellations, door panels, banners, ivy) uses `color`/`type` instead, never `img`, so
+    // filtering on it removes exactly the 13 meme posters and nothing else when Meme Mode is
+    // off, with no separate tagging needed.
+    decor: memeMode
+      ? [...houses.flatMap((h) => h.decor), ...mansion.decor, ...ARENA_POSTERS]
+      : [...houses.flatMap((h) => h.decor), ...mansion.decor, ...ARENA_POSTERS].filter((d) => !d.img),
     grass: EXTENSION_GRASS,
   };
 }
