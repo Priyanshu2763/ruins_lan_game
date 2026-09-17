@@ -92,9 +92,16 @@ export const GRENADE_VISUAL_RADIUS = 0.13; // close to the physics radius now �
 // getMapLayout() below. This keeps the "choose a map" feature cheap (one shared blueprint)
 // while still giving each theme a distinct feel, per an explicit user request to diverge from
 // the earlier "identical layout for every map" decision.
+// `music`: the background-music layers for that map, each a { key, gain } pair matching a
+// SOUND_FILES key in client.js — startBackgroundMusic(mapKey) just loops over this list and
+// starts one looping source per entry, so a map's music is entirely data-driven here. Changing
+// what a map sounds like (swap a track, add/remove a layer, retune a gain) is a one-line edit
+// in this table, no branching logic to touch in client.js — City's helicopter-ambience track
+// stays exactly as it was, just expressed in this new shared shape; Ruins gets its own two-
+// layer combo (a bed track + a lava-ambience layer) instead of reusing City's track.
 export const MAPS = {
-  city:  { name: 'City',  theme: 'day' },
-  ruins: { name: 'Ruins', theme: 'dusk' },
+  city:  { name: 'City',  theme: 'day',  music: [{ key: 'background', gain: 2 }] },
+  ruins: { name: 'Ruins', theme: 'dusk', music: [{ key: 'bg2', gain: 0.8 }, { key: 'lavaSound', gain: 0.6 }] },
 };
 export const DEFAULT_MAP = 'city';
 

@@ -320,6 +320,8 @@ const SOUND_FILES = {
   walking: '/sounds/walking.mp3',
   fall: '/sounds/fall.mp3',
   respawn: '/sounds/respawn.mp3',
+  bg2: '/sounds/bg2.mp3',
+  lavaSound: '/sounds/lava-sound.mp3',
 };
 const soundBuffers = {};
 for (const [key, url] of Object.entries(SOUND_FILES)) {
@@ -906,6 +908,39 @@ function buildHorizon(theme) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(0, 30, 0);
   scene.add(mesh);
+
+  // Ruins ("dusk") only — the cylinder is deliberately open-ended (no top cap), so looking
+  // straight up past its rim (world y=150) falls through to the bare flat scene.background
+  // color with zero painted detail, reading as a literal hole dead-center overhead against an
+  // otherwise fully-painted sunset/lava sky. City's flat blue zenith already looks correct as
+  // real skies ARE just uniform blue overhead, so this stays scoped to dusk — City's rendering
+  // is completely untouched. Solid disc, not a texture: cheap, and the color is an exact match
+  // to the horizon texture's own top-edge pixel (buildHorizonTexture's sky gradient, offset 0)
+  // so it meets the cylinder's rim with no visible seam.
+  if (theme === 'dusk') {
+    // A flat single-color disc here (the first attempt at this fix) still read as an obvious
+    // hard-edged "different patch" — no gradient, no fog treatment, nothing tying it visually
+    // to the rest of the painted sky, so it looked like a hole even though it was technically
+    // covered. Real fix: a radial-gradient texture, same painted-canvas technique as every
+    // other sky/wall texture in this file, so the cap actually continues the horizon's own
+    // color instead of standing apart from it.
+    const capSize = 256;
+    const capCanvas = document.createElement('canvas');
+    capCanvas.width = capSize; capCanvas.height = capSize;
+    const capCtx = capCanvas.getContext('2d');
+    const capGrad = capCtx.createRadialGradient(capSize / 2, capSize / 2, 0, capSize / 2, capSize / 2, capSize / 2);
+    capGrad.addColorStop(0, '#1c150d'); // zenith -- a touch deeper than the rim, a real dusk sky keeps darkening overhead
+    capGrad.addColorStop(1, '#241f16'); // rim edge -- exact match to the horizon texture's own top-edge color (see buildHorizonTexture's sky gradient, offset 0), so the seam is invisible
+    capCtx.fillStyle = capGrad;
+    capCtx.fillRect(0, 0, capSize, capSize);
+    const capTex = new THREE.CanvasTexture(capCanvas);
+    const capGeo = new THREE.CircleGeometry(172, 32); // slightly past the cylinder's own 170 radius, so there's no sliver gap right at the rim
+    const capMat = new THREE.MeshBasicMaterial({ map: capTex, side: THREE.DoubleSide, fog: false, depthWrite: false });
+    const cap = new THREE.Mesh(capGeo, capMat);
+    cap.rotation.x = Math.PI / 2; // flat, facing down toward the camera below
+    cap.position.set(0, 150, 0); // cylinder's own top: mesh.position.y(30) + height/2(120)
+    scene.add(cap);
+  }
 }
 
 // A shared concrete-crack-and-graffiti texture applied (with a per-obstacle color tint) to
@@ -1923,20 +1958,27 @@ function handleMessage(msg) {
   }
 }
 
-// Background music — one looping source for the whole match, 2x gain (the recording as
-// provided reads quiet, same reason the explosion/reload clips got boosted). Flat/non-
-// positional (it's a soundtrack, not a world sound) using the same loop-handle pattern as the
-// AKM's spray loop: keep the source so it can be stopped explicitly rather than left running
-// under the game-over sting.
-let backgroundMusicSource = null;
-function startBackgroundMusic() {
-  if (backgroundMusicSource) return; // already playing — joining mid-match shouldn't restart it
-  backgroundMusicSource = playBuffer('background', { loop: true, gain: 2 });
+// Background music — one or more looping layers, per map (see MAPS[mapKey].music in
+// gameData.js, the single source of truth for what each map sounds like). Flat/non-positional
+// (it's a soundtrack, not a world sound), same loop-handle pattern as the AKM's spray loop:
+// keep every started source so they can all be stopped explicitly rather than left running
+// under the game-over sting. Array-based rather than a single slot specifically so a map can
+// carry any number of layers (City: one track; Ruins: a bed track + a separate lava-ambience
+// layer) without the start/stop logic itself needing to know or care how many there are.
+let backgroundMusicSources = [];
+function startBackgroundMusic(mapKey) {
+  if (backgroundMusicSources.length) return; // already playing — joining mid-match shouldn't restart it
+  const layers = MAPS[mapKey]?.music || MAPS[DEFAULT_MAP].music;
+  for (const { key, gain } of layers) {
+    const src = playBuffer(key, { loop: true, gain });
+    if (src) backgroundMusicSources.push(src);
+  }
 }
 function stopBackgroundMusic() {
-  if (!backgroundMusicSource) return;
-  try { backgroundMusicSource.stop(); } catch { /* already finished */ }
-  backgroundMusicSource = null;
+  for (const src of backgroundMusicSources) {
+    try { src.stop(); } catch { /* already finished */ }
+  }
+  backgroundMusicSources = [];
 }
 
 function onMatchEnded(list) {
@@ -1969,7 +2011,7 @@ function onJoined(msg) {
   matchEndsAt = msg.matchEndsAt || null;
   matchOver = false;
   matchTimer.hidden = !matchEndsAt;
-  startBackgroundMusic();
+  startBackgroundMusic(msg.map || DEFAULT_MAP);
 
   initScene(msg.map || DEFAULT_MAP, msg.memeMode !== false);
   playerX = msg.players.find((p) => p.id === localId)?.pos[0] ?? 0;

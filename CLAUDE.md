@@ -2215,3 +2215,108 @@ confirmed reachable (curl 200 each), every new function/element
 on the remote, pm2 restarted clean. Not browser-tested per standing instruction — the exact
 fall pose/timing feel, eyelid curve shape, and respawn beam's visual weight are exactly what
 the user said they'd test themselves and report back on.
+
+## Batch 53 (2026-09-17): DONE — per-map background music (Ruins gets its own lava/bg2 combo, City untouched)
+
+User pointed out `backround.mp3` (with its helicopter ambience) fit the City map but not
+Ruins, and asked for Ruins to use `bg2.mp3` (80%) + `lava-sound.mp3` (60%) together instead,
+explicitly asking to leave City alone and to keep the system modular/easy to retune.
+
+**Made this fully data-driven rather than branching in code.** Added a `music` field to each
+entry in `MAPS` (`gameData.js`): a list of `{key, gain}` layers, where `key` matches a
+`SOUND_FILES` entry in client.js. `startBackgroundMusic(mapKey)` (client.js) now just reads
+`MAPS[mapKey].music` and starts one looping source per layer into an array
+(`backgroundMusicSources`, replacing the old single-slot `backgroundMusicSource`);
+`stopBackgroundMusic()` stops everything in that array. City's entry is the exact same track
+and gain as before (`background`, gain 2), just expressed in the new shared shape — its actual
+sound is byte-for-byte unchanged. Ruins gets two simultaneous layers (`bg2` gain 0.8,
+`lavaSound` gain 0.6) instead of reusing City's track. Adding, removing, or retuning a map's
+music going forward is a one-line edit to that map's `music` array — no new code path needed,
+which is the "modular and easy to fix" the user asked for.
+
+`onJoined` now passes the actual joined map (`msg.map || DEFAULT_MAP`) into
+`startBackgroundMusic` instead of it running blind — this was the one real gap in the old
+single-track version (it never even knew which map it was playing for, since there was only
+ever one track to consider).
+
+Verified before deploying: `node --check` on both files, confirmed via curl that the live
+`gameData.js`'s `MAPS.city.music`/`MAPS.ruins.music` match exactly what was intended (checked
+the actual deployed content, not just the local diff), both new sound files reachable (curl 200
+each), grep-confirmed the array-based `backgroundMusicSources`/`startBackgroundMusic(mapKey)`
+are live in the served client.js, no stale references to the old singular
+`backgroundMusicSource` anywhere. pm2 restarted clean. Not browser-tested per standing
+instruction — the actual 80/60 volume balance between the two Ruins layers, and whether either
+clip has an audible loop-seam click (neither was trimmed this round, unlike the footstep clips
+in batch 46 which needed it), are worth a real listen.
+
+**Sky hole — investigated, not yet fixed.** Before touching anything, read through the entire
+horizon/skybox system (`buildHorizon`/`buildHorizonTexture`, the shared canvas-painted-skyline-
+on-a-cylinder trick) and ruled out every code-level cause a "hole" could have:
+- The horizon cylinder (`CylinderGeometry(170,170,240,32,1,true)`, full 360° — thetaStart/
+  Length are the unpassed defaults, a complete wrap) is positioned/sized identically for both
+  themes; only its TEXTURE differs. Its radius (170) comfortably encloses the entire playable
+  area including the Ruins-side map extension (farthest reachable corner is ~126.5 units from
+  center) — no way to see past/around it from anywhere a player can stand.
+- The canvas texture itself is proven fully opaque for both themes: an unconditional full-
+  canvas gradient fill happens BEFORE any theme-specific drawing (lava ridges/cracks for dusk,
+  sun/clouds for day), and neither theme's follow-up drawing ever clears or punches through
+  that base layer (no `destination-out`/`clearRect` anywhere in either path) — there's no way
+  for a literal transparent gap to exist in the texture.
+- Checked whether the mansion/houses (the only Ruins-flavored *structures*) could have an
+  actual roof/wall gap letting sky show through somewhere it shouldn't — but `getMapLayout`
+  builds identical mansion/house geometry for BOTH map keys (only colors differ via `mapKey ===
+  'ruins' ? ... : ...`), so a structural gap would show in City too, which doesn't match "not
+  city" in the ask.
+Given all of that comes back clean, this doesn't look like something I can pin down by reading
+code alone — asked the user for a screenshot (and roughly where on the map/from what vantage
+point they're seeing it) before attempting a fix, rather than guess at the wrong theory and
+burn a deploy round-trip on it.
+
+## Batch 53b (2026-09-17): DONE — fixed the Ruins sky hole (dead-center overhead)
+
+Follow-up to batch 53. User confirmed the hole is "right above, dead centre" — looking
+straight up. That pinpointed it precisely: the horizon "sky" is a 360° painted cylinder wrapped
+around the whole map (`buildHorizon`, shared code for both themes), and it's deliberately
+`openEnded: true` — no top cap. Looking straight up passes through that open rim (world y=150)
+and falls through to the bare flat `scene.background` color, which has zero painted detail —
+against Ruins' otherwise fully-painted sunset/lava horizon, that flat gap reads exactly as a
+hole dead-center overhead. City's flat blue zenith already looks correct as-is (a real midday
+sky IS just uniform blue up top), which is exactly why this never showed up there.
+
+**Fix, scoped strictly to Ruins:** added a solid disc (`THREE.CircleGeometry(170, 32)`) capping
+the cylinder's open top, gated behind `if (theme === 'dusk')` — City's code path is completely
+unreached by this addition, confirmed by grep (the new block only exists inside that
+conditional). Colored `0x241f16` — an exact match to the horizon texture's own top-edge pixel
+color (the sky gradient's offset-0 stop in `buildHorizonTexture`) — so the cap meets the
+cylinder's rim with no visible seam, rather than trying to hand-build a continued gradient.
+
+Verified before deploying: `node --check`, grep-confirmed the new cap code only exists inside
+the `theme === 'dusk'` branch (City's rendering is byte-identical to before), pm2 restarted
+clean, grep-confirmed the deployed client.js contains the new geometry. Not browser-tested per
+standing instruction — the exact color match/seam blend is worth a look now that it's live.
+
+## Batch 53c (2026-09-17): DONE — the sky-cap fix from batch 53b still read as a hole, real fix this time
+
+User screenshot showed a large, hard-edged dark circle dominating a large chunk of the normal
+gameplay view (not a rare "look straight up" edge case — the math actually confirms this: at
+map center, the rim is only ~41° above horizontal, well inside the ~74.5° mouse-look pitch
+clamp, so this area is reachable during ordinary aiming/looking around, not just an extreme
+angle). "You painted it on all sides but left on the top" — the batch 53b cap WAS there, but a
+single flat unlit color with no gradient and no fog treatment stood out as an obviously
+different, hard-edged patch against the rest of the painted sky — technically covered, but
+still reading as a void/hole to the eye.
+
+**Real fix:** replaced the flat-color disc with an actual radial-gradient canvas texture (same
+painted-canvas technique already used for every other sky/wall texture in this file, not a new
+pattern) — rim edge exactly matches the horizon texture's own top-edge color (seamless meeting,
+unchanged from 53b), center eases to a slightly deeper tone instead of a flat single shade, so
+it reads as the sky continuing to darken toward zenith (realistic for a dusk sky) rather than a
+separate flat patch. Also bumped the cap's radius from exactly 170 to 172 (a small overlap past
+the cylinder's own 170 radius) to rule out any hairline seam gap right at the rim as a
+contributing factor. Still scoped strictly to `theme === 'dusk'` — City's code path is
+untouched (confirmed via grep, same check as batch 53b).
+
+Syntax-checked, deployed, grep-confirmed the new gradient code is live, pm2 restarted clean.
+Not browser-tested per standing instruction — asking for a fresh screenshot/look this time
+before considering it closed, given the first attempt at this exact fix didn't actually read
+as fixed despite being technically present.
