@@ -3,9 +3,9 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 import os from 'os';
 import path from 'path';
-import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { pool } from './db.js';
 import {
   WEAPONS, MAX_HEALTH, RESPAWN_MS, MAX_PLAYERS_PER_ROOM, SPAWN_POINTS, SPAWN_SAFE_DIST,
   PRONE_HEAD_OFFSET, HEAD_CENTER_Y, HEAD_HALF, CROUCH_SCALE_Y, PLAYER_RADIUS, getMapLayout,
@@ -24,21 +24,13 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/vendor/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build')));
 app.use('/shared', express.static(path.join(__dirname, '..', 'shared')));
 
-// ---------- Auth: simple username/password accounts, stored in a local JSON file ----------
+// ---------- Auth + profile/customization: Postgres-backed (see server/db.js, server/db/schema.sql) ----------
 // Not meant to be bulletproof (this is a LAN party game, not a bank) but real per-account
-// passwords ARE checked, salted+hashed with scrypt (Node's built-in crypto, no extra
-// dependency needed) rather than stored in plaintext. users.json is gitignored — it's local
-// account data, not something that belongs in the repo.
-const USERS_FILE = path.join(__dirname, 'users.json');
-let users = {};
-try {
-  users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-} catch {
-  users = {};
-}
-function saveUsers() {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-}
+// passwords ARE checked, salted+hashed with scrypt (Node's built-in crypto, no extra dependency
+// needed) rather than stored in plaintext. No server-side sessions/tokens — same trust model as
+// before the DB migration: the browser's remembered username (localStorage) is trusted for
+// repeat visits, the real password check happens once at login/register time against the real
+// stored hash.
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');
 }
@@ -48,37 +40,111 @@ function isValidUsername(u) {
 function isValidPassword(p) {
   return typeof p === 'string' && p.length >= 4 && p.length <= 128;
 }
+function isValidHexColor(c) {
+  return typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c);
+}
 
-app.post('/api/register', (req, res) => {
+async function getUserByUsername(username) {
+  const { rows } = await pool.query('SELECT id, username, password_salt, password_hash FROM users WHERE username = $1', [username]);
+  return rows[0] || null;
+}
+
+app.post('/api/register', async (req, res) => {
   const { username, password } = req.body || {};
   if (!isValidUsername(username) || !isValidPassword(password)) {
     return res.status(400).json({ ok: false, error: 'Invalid username or password.' });
   }
-  if (users[username]) {
-    return res.status(409).json({ ok: false, error: 'That username is already taken.' });
+  try {
+    const existing = await getUserByUsername(username);
+    if (existing) {
+      return res.status(409).json({ ok: false, error: 'That username is already taken.' });
+    }
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = hashPassword(password, salt);
+    const { rows } = await pool.query(
+      'INSERT INTO users (username, password_salt, password_hash) VALUES ($1, $2, $3) RETURNING id',
+      [username, salt, hash]
+    );
+    const userId = rows[0].id;
+    await pool.query('INSERT INTO player_stats (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [userId]);
+    await pool.query('INSERT INTO player_customization (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [userId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('register failed:', err);
+    res.status(500).json({ ok: false, error: 'Server error.' });
   }
-  const salt = crypto.randomBytes(16).toString('hex');
-  users[username] = { salt, hash: hashPassword(password, salt) };
-  saveUsers();
-  res.json({ ok: true });
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!isValidUsername(username) || !isValidPassword(password)) {
     return res.status(400).json({ ok: false, error: 'Invalid username or password.' });
   }
-  const user = users[username];
-  if (!user) {
-    return res.status(401).json({ ok: false, error: 'No account with that username.' });
+  try {
+    const user = await getUserByUsername(username);
+    if (!user) {
+      return res.status(401).json({ ok: false, error: 'No account with that username.' });
+    }
+    const hash = hashPassword(password, user.password_salt);
+    const a = Buffer.from(hash, 'hex');
+    const b = Buffer.from(user.password_hash, 'hex');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(401).json({ ok: false, error: 'Wrong password.' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('login failed:', err);
+    res.status(500).json({ ok: false, error: 'Server error.' });
   }
-  const hash = hashPassword(password, user.salt);
-  const a = Buffer.from(hash, 'hex');
-  const b = Buffer.from(user.hash, 'hex');
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ ok: false, error: 'Wrong password.' });
+});
+
+// Profile: stats + customization in one call, for the dashboard's Profile/Character tabs.
+app.get('/api/profile', async (req, res) => {
+  const username = req.query.username;
+  if (!isValidUsername(username)) return res.status(400).json({ ok: false, error: 'Invalid username.' });
+  try {
+    const user = await getUserByUsername(username);
+    if (!user) return res.status(404).json({ ok: false, error: 'No such account.' });
+    const [statsRes, custRes] = await Promise.all([
+      pool.query('SELECT kills, deaths, matches_played FROM player_stats WHERE user_id = $1', [user.id]),
+      pool.query('SELECT primary_color, secondary_color FROM player_customization WHERE user_id = $1', [user.id]),
+    ]);
+    const stats = statsRes.rows[0] || { kills: 0, deaths: 0, matches_played: 0 };
+    const cust = custRes.rows[0] || { primary_color: '#3d7dca', secondary_color: '#c79b73' };
+    res.json({
+      ok: true,
+      username: user.username,
+      kills: stats.kills,
+      deaths: stats.deaths,
+      matchesPlayed: stats.matches_played,
+      primaryColor: cust.primary_color,
+      secondaryColor: cust.secondary_color,
+    });
+  } catch (err) {
+    console.error('profile fetch failed:', err);
+    res.status(500).json({ ok: false, error: 'Server error.' });
   }
-  res.json({ ok: true });
+});
+
+app.post('/api/customization', async (req, res) => {
+  const { username, primaryColor, secondaryColor } = req.body || {};
+  if (!isValidUsername(username) || !isValidHexColor(primaryColor) || !isValidHexColor(secondaryColor)) {
+    return res.status(400).json({ ok: false, error: 'Invalid customization data.' });
+  }
+  try {
+    const user = await getUserByUsername(username);
+    if (!user) return res.status(404).json({ ok: false, error: 'No such account.' });
+    await pool.query(
+      `INSERT INTO player_customization (user_id, primary_color, secondary_color, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (user_id) DO UPDATE SET primary_color = $2, secondary_color = $3, updated_at = now()`,
+      [user.id, primaryColor, secondaryColor]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('customization save failed:', err);
+    res.status(500).json({ ok: false, error: 'Server error.' });
+  }
 });
 
 const server = http.createServer(app);
@@ -176,6 +242,18 @@ function applyDamage(shooter, target, dmg, room, weaponName) {
     target.alive = false;
     if (shooter.id !== target.id) shooter.kills += 1; // a self-frag is a death, not a kill credit
     target.deaths += 1;
+    // Persisted, live, per event rather than reconciled at match end — simplest way to avoid
+    // double-counting across reconnects/rejoin-by-name (batch 4's reclaim only touches the
+    // room-local kills/deaths fields, not the DB row). Fire-and-forget: a lost DB write here
+    // just means one kill/death doesn't show up on the Profile tab, not a game-breaking issue.
+    if (shooter.id !== target.id && shooter.accountId) {
+      pool.query('UPDATE player_stats SET kills = kills + 1, updated_at = now() WHERE user_id = $1', [shooter.accountId])
+        .catch((err) => console.error('kill persist failed:', err));
+    }
+    if (target.accountId) {
+      pool.query('UPDATE player_stats SET deaths = deaths + 1, updated_at = now() WHERE user_id = $1', [target.accountId])
+        .catch((err) => console.error('death persist failed:', err));
+    }
     broadcastRoom(room, {
       type: 'killed',
       killerId: shooter.id,
@@ -197,6 +275,10 @@ function killByEnvironment(target, room, reason) {
   target.health = 0;
   target.alive = false;
   target.deaths += 1;
+  if (target.accountId) {
+    pool.query('UPDATE player_stats SET deaths = deaths + 1, updated_at = now() WHERE user_id = $1', [target.accountId])
+      .catch((err) => console.error('death persist failed:', err));
+  }
   broadcastRoom(room, {
     type: 'killed',
     killerId: null,
@@ -588,7 +670,7 @@ wss.on('connection', (ws) => {
   ws.id = nextPlayerId++;
   ws.roomId = null;
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -598,6 +680,13 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'hello') {
       ws.name = String(msg.name || 'Player').slice(0, 16);
+      if (isValidHexColor(msg.color)) ws.color = msg.color;
+      // Stored synchronously — the actual DB lookup happens inline inside joinRoom(), awaited
+      // right before the player object is created. An async lookup fired here instead (and
+      // merely hoped to finish in time) lost this race in practice every single time: the real
+      // client sends 'hello' immediately followed by 'createRoom'/'joinRoom' with zero delay,
+      // so the DB round-trip never won against the very next synchronous message.
+      ws.authUsername = isValidUsername(msg.username) ? msg.username : null;
       send(ws, { type: 'rooms', rooms: [...rooms.values()].map(roomSummary) });
       return;
     }
@@ -639,7 +728,7 @@ wss.on('connection', (ws) => {
       }
       initPickups(room);
       rooms.set(room.id, room);
-      joinRoom(ws, room);
+      await joinRoom(ws, room);
       broadcastRoomList();
       return;
     }
@@ -654,7 +743,7 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'error', message: 'Room is full' });
         return;
       }
-      joinRoom(ws, room);
+      await joinRoom(ws, room);
       broadcastRoomList();
       return;
     }
@@ -712,9 +801,23 @@ wss.on('connection', (ws) => {
   });
 });
 
-function joinRoom(ws, room) {
+async function joinRoom(ws, room) {
   ws.roomId = room.id;
   const name = ws.name || `Player${ws.id}`;
+  // Resolved HERE, awaited, right before the player object is built — not fired-and-hoped-for
+  // back in the 'hello' handler. Fixed a real bug: the client sends 'hello' immediately followed
+  // by 'createRoom'/'joinRoom' with zero delay, so an async lookup started in 'hello' never won
+  // that race against the very next message in practice (confirmed with a live two-client test
+  // before landing this fix — matches_played stayed 0 every time under the old approach).
+  let accountId = null;
+  if (ws.authUsername) {
+    try {
+      const user = await getUserByUsername(ws.authUsername);
+      if (user) accountId = user.id;
+    } catch (err) {
+      console.error('joinRoom account lookup failed:', err);
+    }
+  }
   // A page refresh disconnects the old socket (its stats land in leftStats) and immediately
   // opens a new one with a new id — without this, the same person shows up twice on the
   // scoreboard: one row via leftStats (their old id) and one fresh 0/0 row (their new id).
@@ -733,6 +836,8 @@ function joinRoom(ws, room) {
     id: ws.id,
     ws,
     name,
+    accountId,
+    color: ws.color || null,
     pos: randomSpawn(room),
     rot: [0, 0],
     weapon: 0,
@@ -746,6 +851,17 @@ function joinRoom(ws, room) {
   };
   room.players.set(ws.id, player);
 
+  // Persisted stat: "a match played" is counted the moment you actually join a room, once per
+  // connection (a ws only ever joins one room in its lifetime) — no double-count risk. Kills/
+  // deaths persist separately, live, from applyDamage.
+  if (player.accountId) {
+    pool.query(
+      `INSERT INTO player_stats (user_id, matches_played) VALUES ($1, 1)
+       ON CONFLICT (user_id) DO UPDATE SET matches_played = player_stats.matches_played + 1, updated_at = now()`,
+      [player.accountId]
+    ).catch((err) => console.error('matches_played persist failed:', err));
+  }
+
   send(ws, {
     type: 'joined',
     roomId: room.id,
@@ -757,7 +873,7 @@ function joinRoom(ws, room) {
     weapons: WEAPONS,
     players: [...room.players.values()].map((p) => ({
       id: p.id, name: p.name, pos: p.pos, rot: p.rot, weapon: p.weapon, health: p.health, alive: p.alive,
-      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint,
+      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint, color: p.color,
     })),
   });
   broadcastRoom(room, { type: 'playerJoined', player: { id: player.id, name: player.name } }, player.id);
@@ -771,7 +887,7 @@ setInterval(() => {
     checkPickups(room);
     const players = [...room.players.values()].map((p) => ({
       id: p.id, pos: p.pos, rot: p.rot, weapon: p.weapon, health: p.health, alive: p.alive,
-      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint,
+      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint, color: p.color,
     }));
     const grenades = (room.grenades || []).map((g) => ({ id: g.id, pos: g.pos }));
     const pickups = (room.pickups || []).filter((p) => p.active).map((p) => ({ idx: p.idx, pos: p.pos, type: p.type, weaponId: p.weaponId }));
@@ -787,7 +903,7 @@ server.listen(PORT, () => {
       if (net.family === 'IPv4' && !net.internal) addrs.push(net.address);
     }
   }
-  console.log(`\nRuins FPP server running.`);
+  console.log(`\nWreckveil server running.`);
   console.log(`  Local:  http://localhost:${PORT}`);
   for (const addr of addrs) console.log(`  LAN:    http://${addr}:${PORT}`);
   console.log(`\nShare the LAN address with friends on the same network/WiFi.\n`);

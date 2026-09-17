@@ -46,6 +46,10 @@ export const state = {
   pitch: 0,
   yaw: 0,
 
+  // ---- settings (dashboard's Settings tab owns the writes, persisted to localStorage there;
+  // movement.js/audio.js read these) ----
+  mouseSensitivity: 1,
+
   // ---- session/alive flags (death.js and the bootstrap's onMatchEnded own the writes; read
   // almost everywhere movement/firing/input needs to be frozen) ----
   localAlive: true,

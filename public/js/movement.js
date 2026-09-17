@@ -205,8 +205,9 @@ export function updateMovement(dt) {
 // which drives camera.rotation.x/z directly).
 document.addEventListener('mousemove', (e) => {
   if (!state.pointerLocked || !state.localAlive) return;
-  state.yaw -= e.movementX * 0.0022;
-  state.pitch -= e.movementY * 0.0022;
+  const sens = 0.0022 * state.mouseSensitivity;
+  state.yaw -= e.movementX * sens;
+  state.pitch -= e.movementY * sens;
   state.pitch = Math.max(-1.3, Math.min(1.3, state.pitch));
   state.yawObject.rotation.y = state.yaw;
   state.camera.rotation.x = state.pitch;

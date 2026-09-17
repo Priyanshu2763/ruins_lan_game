@@ -10,6 +10,14 @@ function unlockAudio() { if (audioCtx.state === 'suspended') audioCtx.resume(); 
 document.addEventListener('click', unlockAudio, { once: true });
 document.addEventListener('keydown', unlockAudio, { once: true });
 
+// Single shared gain node every sound in this file routes through on its way to the real audio
+// output — this is what makes the dashboard's Settings-tab master volume slider a real control
+// instead of a per-sound guess: one node, one place to change, every call site below points at
+// `masterGain` instead of `audioCtx.destination` directly.
+const masterGain = audioCtx.createGain();
+masterGain.connect(audioCtx.destination);
+export function setMasterVolume(v) { masterGain.gain.value = Math.max(0, Math.min(1, v)); }
+
 // Decoded once each at page load (these are all under 4s, so by the time a player has gotten
 // through auth + the menu + actually joined a room, decoding is long finished) and cached —
 // `playBuffer` just clones a fresh BufferSource per play, which is what lets the same clip
@@ -56,7 +64,7 @@ export function playBuffer(key, { gain = 1, loop = false } = {}) {
   src.loop = loop;
   const g = audioCtx.createGain();
   g.gain.value = gain;
-  src.connect(g); g.connect(audioCtx.destination);
+  src.connect(g); g.connect(masterGain);
   src.start();
   return src;
 }
@@ -79,7 +87,7 @@ export function playRingEffect() {
   g.gain.setValueAtTime(1, t0);
   g.gain.setValueAtTime(1, t0 + dur - fadeDur);
   g.gain.linearRampToValueAtTime(0, t0 + dur);
-  src.connect(g); g.connect(audioCtx.destination);
+  src.connect(g); g.connect(masterGain);
   src.start();
 }
 
@@ -220,7 +228,7 @@ function startPositionalSource(key, pos, gain, loop) {
 
   src.connect(wetPanner); wetPanner.connect(wetGain); wetGain.connect(filter);
   src.connect(dryPanner); dryPanner.connect(dryGain); dryGain.connect(filter); // WebAudio sums multiple inputs into one node automatically
-  filter.connect(mixGain); mixGain.connect(audioCtx.destination);
+  filter.connect(mixGain); mixGain.connect(masterGain);
 
   applyOcclusionParams(filter, mixGain, 1, isOccludedBetween(localListenerPos(), pos));
   src.start();
@@ -257,7 +265,7 @@ function tone(freq, dur, type, gain, glideTo) {
   if (glideTo) osc.frequency.exponentialRampToValueAtTime(glideTo, t0 + dur);
   g.gain.setValueAtTime(gain, t0);
   g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-  osc.connect(g); g.connect(audioCtx.destination);
+  osc.connect(g); g.connect(masterGain);
   osc.start(t0); osc.stop(t0 + dur + 0.02);
 }
 // `filterType` defaults to lowpass (a dull "thud"/boom — explosions, damage, the old
@@ -280,7 +288,7 @@ function noiseBurst(dur, gain, filterFreq, filterType) {
   const g = audioCtx.createGain();
   g.gain.setValueAtTime(gain, t0);
   g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-  src.connect(filt); filt.connect(g); g.connect(audioCtx.destination);
+  src.connect(filt); filt.connect(g); g.connect(masterGain);
   src.start(t0);
 }
 // Per-weapon gunshots use the provided recordings. Glock and Shotgun fire semi-auto (one

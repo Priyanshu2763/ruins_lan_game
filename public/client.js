@@ -52,7 +52,7 @@ function onJoined(msg) {
 
   for (const p of msg.players) {
     if (p.id === state.localId) continue;
-    createRemote(p.id, p.name, p.pos);
+    createRemote(p.id, p.name, p.pos, p.color);
   }
   setWeapon(0);
   setHealth(MAX_HEALTH);

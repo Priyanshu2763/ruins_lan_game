@@ -2,6 +2,7 @@ import { MAPS, MAP_BOUNDS, DEFAULT_MAP } from '/shared/gameData.js';
 import { state } from './state.js';
 import { sendMsg } from './net.js';
 import { cancelGrenadeAim } from './weapons.js';
+import { setMasterVolume } from './audio.js';
 
 // ---------- DOM ----------
 const authScreen = document.getElementById('authScreen');
@@ -10,8 +11,14 @@ const authPassInput = document.getElementById('authPassInput');
 const authError = document.getElementById('authError');
 const authLoginBtn = document.getElementById('authLoginBtn');
 const authRegisterBtn = document.getElementById('authRegisterBtn');
-const accountLabel = document.getElementById('accountLabel');
-const logoutBtn = document.getElementById('logoutBtn');
+const dashboardScreen = document.getElementById('dashboardScreen');
+const dashAccountLabel = document.getElementById('dashAccountLabel');
+const dashLogoutBtn = document.getElementById('dashLogoutBtn');
+const dashPlayBtn = document.getElementById('dashPlayBtn');
+const dashControlsBtn = document.getElementById('dashControlsBtn');
+const dashNavBtns = document.querySelectorAll('.dashNavBtn[data-pane]');
+const dashPanes = document.querySelectorAll('.dashPane[data-pane]');
+const closeMenuBtn = document.getElementById('closeMenuBtn');
 export const menuScreen = document.getElementById('menuScreen');
 export const nameInput = document.getElementById('nameInput');
 const roomNameInput = document.getElementById('roomNameInput');
@@ -38,36 +45,47 @@ export const matchTimer = document.getElementById('matchTimer');
 export const matchEndScreen = document.getElementById('matchEndScreen');
 export const matchEndBody = document.getElementById('matchEndBody');
 const matchEndQuitBtn = document.getElementById('matchEndQuitBtn');
-const controlsBtn = document.getElementById('controlsBtn');
 const controlsModal = document.getElementById('controlsModal');
 const closeControlsBtn = document.getElementById('closeControlsBtn');
 let controlsOpenedFromPause = false;
-controlsBtn.addEventListener('click', () => { controlsModal.hidden = false; });
+dashControlsBtn.addEventListener('click', () => { controlsModal.hidden = false; });
 closeControlsBtn.addEventListener('click', () => {
   controlsModal.hidden = true;
   if (controlsOpenedFromPause) { pauseMenu.hidden = false; controlsOpenedFromPause = false; }
 });
 
-// ---------- Auth: simple username/password, checked against server/users.json ----------
+// ---------- Auth: simple username/password, checked against the Postgres-backed /api/* routes
+// (server/db.js) ----------
 // Not meant to be bulletproof security — this is a LAN party game, not a bank — but a real
 // username/password IS checked against the server on login/register (so you can't just claim
 // someone else's name without their password). Once verified, the browser remembers it
 // (`ruins_auth` in localStorage) so a reload — including the "Quit to Menu" flow, which is a
-// full `location.reload()` — goes straight back to the join/create tab instead of asking for
-// the password again every time.
+// full `location.reload()` — goes straight back to the dashboard instead of asking for the
+// password again every time.
 function getAuth() {
   try { return JSON.parse(localStorage.getItem('ruins_auth') || 'null'); } catch { return null; }
 }
 function setAuth(username) { localStorage.setItem('ruins_auth', JSON.stringify({ username })); }
 function clearAuth() { localStorage.removeItem('ruins_auth'); }
 
-function showMenu(username) {
+// The signed-in account's chosen customization color — fetched once on showing the dashboard,
+// re-sent on every `hello` (see sendHello() below, which reads myPrimaryColor directly since
+// it's declared in this same module) so the server can attach it to this player's room entry
+// and broadcast it to everyone else's `characters.js` remote-figure rendering.
+let myUsername = null;
+let myPrimaryColor = null;
+let mySecondaryColor = null;
+
+function showDashboard(username) {
   authScreen.hidden = true;
-  menuScreen.hidden = false;
-  accountLabel.textContent = `Signed in as ${username}`;
+  dashboardScreen.hidden = false;
+  myUsername = username;
+  dashAccountLabel.textContent = `Signed in as ${username}`;
   if (!nameInput.value) nameInput.value = username;
+  loadProfile();
 }
 function showAuth() {
+  dashboardScreen.hidden = true;
   menuScreen.hidden = true;
   authScreen.hidden = false;
   authPassInput.value = '';
@@ -101,7 +119,7 @@ async function submitAuth(kind) {
       return;
     }
     setAuth(username);
-    showMenu(username);
+    showDashboard(username);
   } catch (err) {
     authError.textContent = 'Could not reach the server.';
   } finally {
@@ -112,11 +130,131 @@ authLoginBtn.addEventListener('click', () => submitAuth('login'));
 authRegisterBtn.addEventListener('click', () => submitAuth('register'));
 authPassInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth('login'); });
 authUserInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') authPassInput.focus(); });
-logoutBtn.addEventListener('click', () => { clearAuth(); showAuth(); });
+dashLogoutBtn.addEventListener('click', () => { clearAuth(); showAuth(); });
 
 const savedAuth = getAuth();
-if (savedAuth && savedAuth.username) showMenu(savedAuth.username);
+if (savedAuth && savedAuth.username) showDashboard(savedAuth.username);
 else showAuth();
+
+// ---------- Dashboard: sidebar nav + panes, Play modal open/close ----------
+function setDashPane(pane) {
+  dashNavBtns.forEach((b) => b.classList.toggle('active', b.dataset.pane === pane));
+  dashPanes.forEach((p) => { p.hidden = p.dataset.pane !== pane; });
+}
+dashNavBtns.forEach((btn) => btn.addEventListener('click', () => setDashPane(btn.dataset.pane)));
+
+function openPlayModal() {
+  dashboardScreen.hidden = true;
+  menuScreen.hidden = false;
+  sendMsg({ type: 'listRooms' });
+}
+function closePlayModal() {
+  menuScreen.hidden = true;
+  dashboardScreen.hidden = false;
+}
+dashPlayBtn.addEventListener('click', openPlayModal);
+closeMenuBtn.addEventListener('click', closePlayModal);
+
+// ---------- Profile tab: lifetime stats fetched from the account's DB row ----------
+const statKills = document.getElementById('statKills');
+const statDeaths = document.getElementById('statDeaths');
+const statKD = document.getElementById('statKD');
+const statMatches = document.getElementById('statMatches');
+const primaryColorInput = document.getElementById('primaryColorInput');
+const secondaryColorInput = document.getElementById('secondaryColorInput');
+const charPreviewPrimary = document.getElementById('charPreviewPrimary');
+const charPreviewSecondary = document.getElementById('charPreviewSecondary');
+const saveCharacterBtn = document.getElementById('saveCharacterBtn');
+const characterSaveMsg = document.getElementById('characterSaveMsg');
+
+async function loadProfile() {
+  if (!myUsername) return;
+  try {
+    const res = await fetch(`/api/profile?username=${encodeURIComponent(myUsername)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) return;
+    statKills.textContent = data.kills;
+    statDeaths.textContent = data.deaths;
+    statKD.textContent = data.deaths > 0 ? (data.kills / data.deaths).toFixed(2) : data.kills.toFixed(2);
+    statMatches.textContent = data.matchesPlayed;
+    myPrimaryColor = data.primaryColor;
+    mySecondaryColor = data.secondaryColor;
+    primaryColorInput.value = data.primaryColor;
+    secondaryColorInput.value = data.secondaryColor;
+    charPreviewPrimary.style.background = data.primaryColor;
+    charPreviewSecondary.style.background = data.secondaryColor;
+  } catch (err) {
+    // Profile is a nice-to-have on the dashboard, not a gate on playing — a failed fetch just
+    // leaves the stat cards at their placeholder '–' rather than blocking anything.
+  }
+}
+
+primaryColorInput.addEventListener('input', () => { charPreviewPrimary.style.background = primaryColorInput.value; });
+secondaryColorInput.addEventListener('input', () => { charPreviewSecondary.style.background = secondaryColorInput.value; });
+
+saveCharacterBtn.addEventListener('click', async () => {
+  if (!myUsername) return;
+  saveCharacterBtn.disabled = true;
+  characterSaveMsg.textContent = '';
+  try {
+    const res = await fetch('/api/customization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: myUsername,
+        primaryColor: primaryColorInput.value,
+        secondaryColor: secondaryColorInput.value,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      characterSaveMsg.textContent = data.error || 'Save failed.';
+      return;
+    }
+    myPrimaryColor = primaryColorInput.value;
+    mySecondaryColor = secondaryColorInput.value;
+    characterSaveMsg.textContent = 'Saved.';
+    setTimeout(() => { characterSaveMsg.textContent = ''; }, 2500);
+  } catch (err) {
+    characterSaveMsg.textContent = 'Could not reach the server.';
+  } finally {
+    saveCharacterBtn.disabled = false;
+  }
+});
+
+// ---------- Settings tab: master volume + mouse sensitivity, saved to localStorage ----------
+const masterVolumeInput = document.getElementById('masterVolumeInput');
+const masterVolumeVal = document.getElementById('masterVolumeVal');
+const mouseSensInput = document.getElementById('mouseSensInput');
+const mouseSensVal = document.getElementById('mouseSensVal');
+
+function loadSettings() {
+  const savedVol = localStorage.getItem('ruins_masterVolume');
+  const vol = savedVol !== null ? Number(savedVol) : 80;
+  masterVolumeInput.value = vol;
+  masterVolumeVal.textContent = `${vol}%`;
+  setMasterVolume(vol / 100);
+
+  const savedSens = localStorage.getItem('ruins_mouseSensitivity');
+  const sens = savedSens !== null ? Number(savedSens) : 100;
+  mouseSensInput.value = sens;
+  mouseSensVal.textContent = `${sens}%`;
+  state.mouseSensitivity = sens / 100;
+}
+loadSettings();
+
+masterVolumeInput.addEventListener('input', () => {
+  const vol = Number(masterVolumeInput.value);
+  masterVolumeVal.textContent = `${vol}%`;
+  setMasterVolume(vol / 100);
+  localStorage.setItem('ruins_masterVolume', String(vol));
+});
+mouseSensInput.addEventListener('input', () => {
+  const sens = Number(mouseSensInput.value);
+  mouseSensVal.textContent = `${sens}%`;
+  state.mouseSensitivity = sens / 100;
+  localStorage.setItem('ruins_mouseSensitivity', String(sens));
+});
 
 // Every button in the UI gets 2 small blood-stain decals, picked randomly per button so no two
 // look the same — random source image per decal (both provided splatter photos get used, not
@@ -132,14 +270,20 @@ else showAuth();
 // miss out, but nothing in this UI works that way.
 function decorateButtonsWithBlood() {
   const images = ['/images/blood_splat1.png', '/images/blood_splat2.png'];
-  const corners = [
-    { top: '-8px', left: '-8px' }, { top: '-8px', right: '-8px' },
-    { bottom: '-8px', left: '-8px' }, { bottom: '-8px', right: '-8px' },
-  ];
-  document.querySelectorAll('button').forEach((btn) => {
+  // Fixed corners now, not a random pick of any 2-of-4 — top-right and bottom-left specifically
+  // (reported as "messy": a random corner + a negative offset let the decal's own square image
+  // bounds bleed OUTSIDE the button's edge, reading as a floating rectangle against the page
+  // background rather than a stain on the button). `overflow: hidden` on the button (set below)
+  // now guarantees the decal is clipped to the button's own rounded rect no matter its rotation,
+  // so it only ever covers part of that corner, never spills past it.
+  const corners = [{ top: '-4px', right: '-4px' }, { bottom: '-4px', left: '-4px' }];
+  // .modalClose excluded: it's a tiny icon-only "×" button (~30px) — decals sized for a normal
+  // label button (16-30px each) would swallow the glyph entirely rather than just accenting a
+  // corner of it.
+  document.querySelectorAll('button:not(.modalClose)').forEach((btn) => {
     if (getComputedStyle(btn).position === 'static') btn.style.position = 'relative';
-    const shuffled = [...corners].sort(() => Math.random() - 0.5);
-    for (let i = 0; i < 2; i++) {
+    btn.style.overflow = 'hidden';
+    corners.forEach((corner) => {
       const decal = document.createElement('img');
       decal.className = 'btnBloodDecal';
       decal.alt = '';
@@ -149,9 +293,9 @@ function decorateButtonsWithBlood() {
       const rot = Math.floor(Math.random() * 360);
       const flip = Math.random() < 0.5 ? -1 : 1;
       decal.style.transform = `rotate(${rot}deg) scaleX(${flip})`;
-      Object.assign(decal.style, shuffled[i]);
+      Object.assign(decal.style, corner);
       btn.appendChild(decal);
-    }
+    });
   });
 }
 decorateButtonsWithBlood();
@@ -177,6 +321,15 @@ export function currentName() {
   return n;
 }
 
+// Re-sent every time we "introduce" ourselves to the server (name change, create/join room) —
+// carries the account username (so the server can link this connection to a real DB row for
+// persisted stats) and the chosen Character-tab color (so remote players render it, see
+// characters.js/getMyColor). Both optional server-side: a guest with no linked account still
+// plays fine, just without persisted stats or a custom color.
+function sendHello() {
+  sendMsg({ type: 'hello', name: currentName(), username: myUsername || undefined, color: myPrimaryColor || undefined });
+}
+
 // The time input now has `step="1"` (index.html) so its native picker shows a seconds field
 // too — once a `<input type=time>` allows sub-minute precision, its `.value` format switches
 // from "HH:MM" to "HH:MM:SS" on its own (that's the browser's behavior, not something set
@@ -200,7 +353,7 @@ memeModeToggle.addEventListener('click', () => {
 });
 
 createBtn.addEventListener('click', () => {
-  sendMsg({ type: 'hello', name: currentName() });
+  sendHello();
   const rn = (roomNameInput.value || 'Ruins Match').trim().slice(0, 24) || 'Ruins Match';
   const durationSec = parseDurationSec(matchDurationInput.value);
   sendMsg({ type: 'createRoom', roomName: rn, map: mapSelect.value || DEFAULT_MAP, durationSec, memeMode: memeModeOn });
@@ -208,7 +361,7 @@ createBtn.addEventListener('click', () => {
 
 matchEndQuitBtn.addEventListener('click', () => { location.reload(); });
 
-nameInput.addEventListener('change', () => sendMsg({ type: 'hello', name: currentName() }));
+nameInput.addEventListener('change', sendHello);
 
 export function renderRoomList(rooms) {
   roomListEl.innerHTML = '';
@@ -222,7 +375,7 @@ export function renderRoomList(rooms) {
     const mapName = MAPS[r.map]?.name || 'City';
     row.innerHTML = `<span>${escapeHtml(r.name)} <span class="count">· ${mapName}</span></span><span class="count">${r.count}/${r.max}</span>`;
     row.addEventListener('click', () => {
-      sendMsg({ type: 'hello', name: currentName() });
+      sendHello();
       sendMsg({ type: 'joinRoom', roomId: r.id });
     });
     roomListEl.appendChild(row);

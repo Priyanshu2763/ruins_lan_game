@@ -14,10 +14,13 @@ function colorForId(id) {
 // apart again (see handleAttack, server/index.js).
 const HIP_Y = 0.9, SHOULDER_Y = 1.45, HEAD_Y = HEAD_CENTER_Y;
 
-function buildCharacterFigure(id, name) {
+function buildCharacterFigure(id, name, colorHex) {
   const root = new THREE.Group(); // origin at feet (y=0) so crouch scaling just works
   const skin = new THREE.MeshStandardMaterial({ color: 0xc79b73, roughness: 0.6, metalness: 0.05 });
-  const suit = new THREE.MeshStandardMaterial({ color: colorForId(id), roughness: 0.45, metalness: 0.25 });
+  // A player's chosen Character-tab color overrides the id-hashed default when they have one set
+  // (see the dashboard's Character tab / player_customization table) — colorForId stays as the
+  // fallback for anyone who hasn't customized (or is a guest with no linked account).
+  const suit = new THREE.MeshStandardMaterial({ color: colorHex || colorForId(id), roughness: 0.45, metalness: 0.25 });
 
   const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.28), suit);
   torso.position.set(0, HIP_Y + 0.35, 0);
@@ -58,7 +61,7 @@ function buildCharacterFigure(id, name) {
   knife.position.set(0.04, -armLen + 0.05, -0.14);
   armR.add(longGun, pistol, knife);
 
-  return { root, legL, legR, armL, armR, heldGuns: { longGun, pistol, knife } };
+  return { root, legL, legR, armL, armR, heldGuns: { longGun, pistol, knife }, suit };
 }
 
 function heldWeaponKind(weapon) {
@@ -72,13 +75,13 @@ const remotePlayers = new Map(); // id -> { mesh, legL, legR, armL, armR, walkPh
 
 export function hasRemote(id) { return remotePlayers.has(id); }
 
-export function createRemote(id, name, pos) {
-  const fig = buildCharacterFigure(id, name);
+export function createRemote(id, name, pos, colorHex) {
+  const fig = buildCharacterFigure(id, name, colorHex);
   fig.root.position.set(pos[0], pos[1] || 0, pos[2]);
   state.scene.add(fig.root);
   remotePlayers.set(id, {
     id, mesh: fig.root, legL: fig.legL, legR: fig.legR, armL: fig.armL, armR: fig.armR,
-    heldGuns: fig.heldGuns, weapon: 0,
+    heldGuns: fig.heldGuns, suit: fig.suit, color: colorHex || null, weapon: 0,
     targetPos: new THREE.Vector3(pos[0], pos[1] || 0, pos[2]), targetRotY: 0,
     walkPhase: 0, moving: false, crouch: false, prone: false,
   });
@@ -98,7 +101,7 @@ export function removeRemote(id) {
 export function syncRemotePlayer(p) {
   let rp = remotePlayers.get(p.id);
   if (!rp) {
-    createRemote(p.id, `Player${p.id}`, p.pos);
+    createRemote(p.id, `Player${p.id}`, p.pos, p.color);
     rp = remotePlayers.get(p.id);
   }
   rp.targetPos.set(p.pos[0], p.pos[1] || 0, p.pos[2]);
@@ -108,6 +111,10 @@ export function syncRemotePlayer(p) {
   rp.prone = !!p.prone;
   rp.moving = !!p.moving;
   rp.weapon = p.weapon;
+  // A player's color is set once at join and doesn't change mid-match, but this cheaply covers
+  // the rare case where their `joined`/first `state` snapshot arrived before their `hello`'s
+  // accountId lookup resolved server-side (see server/index.js) and a later tick carries it.
+  if (p.color && p.color !== rp.color) { rp.color = p.color; rp.suit.color.set(p.color); }
   setRemoteFootstepMode(p.id, !p.alive || !p.moving ? null : p.sprint ? 'run' : 'walk', p.pos);
 }
 
