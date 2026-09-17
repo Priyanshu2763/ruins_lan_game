@@ -2320,3 +2320,146 @@ Syntax-checked, deployed, grep-confirmed the new gradient code is live, pm2 rest
 Not browser-tested per standing instruction — asking for a fresh screenshot/look this time
 before considering it closed, given the first attempt at this exact fix didn't actually read
 as fixed despite being technically present.
+
+## Batch 54 (2026-09-17): DONE — split the 2,765-line client.js into 11 proper modules
+
+User asked, after a design-discussion round about the game's limitations/mobile/voice-chat/
+graphics options, to fix an existing structural problem first: "there is one giant file please
+carefully make everything modular and divide it into functions and files as standard practice
+says and optimize the code structure over all... make sure nothing breaks."
+
+**Scoped to `client.js` only** — `server/index.js` (794 lines) and `shared/gameData.js` (763
+lines) are already single-purpose, cohesive files; the "giant file" complaint was specifically
+about the 2,765-line, ~230-top-level-declaration client script that every prior batch had been
+adding onto. Planned via `EnterPlanMode` + a Plan-agent review before touching anything, given
+the scale and that this is a live game people actively play — the approved plan is in this
+session's history; summary of what actually shipped follows.
+
+**New structure**: `public/js/` now holds 11 feature modules (`state.js`, `net.js`, `audio.js`,
+`ui.js`, `world.js`, `characters.js`, `pickups.js`, `grenades.js`, `weapons.js`, `movement.js`,
+`death.js`); `public/client.js` (221 lines, down from 2,765) becomes a thin bootstrap that owns
+only the inbound-message dispatch and the main render loop — the two things that legitimately
+touch nearly every module and would otherwise force circular imports between feature files.
+**Zero changes needed to `index.html` or `server/index.js`** — `express.static` already serves
+the whole `public/` tree, so the new `/js/*.js` paths work automatically, and the existing
+single `<script type="module" src="/client.js">` tag didn't need to move.
+
+**Shared state — one flat mutable object (`js/state.js`), not per-variable exports.** ES
+modules only allow reassigning a binding from the module that declared it, so `export let x`
+can't be set from an importer — mutating a *property* of an imported object (`state.x = ...`)
+is always legal, which is what makes this pattern work at all. Flat (`state.playerX`, not
+`state.player.x`) so every call site is a pure `playerX` → `state.playerX` rename, nothing more
+— minimizes the mechanical-edit risk on top of the real re-architecture work. Deliberately
+trimmed to ~25 genuinely cross-module fields (camera/scene/yawObject, player position/stance/
+look direction, alive/session flags, the active map layout arrays) — anything only ever
+touched inside one feature file (reload timers, the AKM loop handle, grenade-aim UI state,
+`audioCtx`/`soundBuffers`, the three player/grenade/pickup Maps) stayed a private `let` in that
+file instead, extending the codebase's own pre-existing `syncGrenades`/`syncPickups`
+encapsulation pattern rather than exposing raw state — new small functions
+(`syncRemotePlayer`/`updateRemotePlayers` in characters.js, `updateGrenades` in grenades.js,
+`applyPickup`/`getCurrentWeaponIndex` in weapons.js) cover the handful of places that used to
+reach into those Maps/variables directly.
+
+**Circular-import resolution, decided concretely rather than left to "ES modules tolerate
+it":** `net.js` imports ONLY `state.js` — never a feature module — so every feature module can
+import `sendMsg`/`sendState` from it with zero risk. The inbound message switch
+(`handleMessage`) and the render loop (`animate`) both stayed in the bootstrap rather than
+living in `net.js`, since they're the two functions that legitimately need to call into nearly
+every module. One additional case found only while writing the actual code (not anticipated in
+the plan): `initScene` (world.js) used to also call `initViewmodels()`/`initTrajectoryVisuals()`
+(weapons.js) and `animate()` (the bootstrap) at the end of its one-time setup — moved those
+three calls out into a small separate bootstrap-owned gate (`startGameLoopOnce`, called right
+after `initScene` from `onJoined`) instead, which preserves the exact original "all four things
+happen together, exactly once" guarantee without world.js ever needing to import weapons.js or
+the bootstrap.
+
+**Verified before deploying — more rigor than the project's usual `node --check`, called out
+explicitly because a broken import path or wrong export name in browser ES modules never shows
+up in `pm2 logs` or a `curl` 200 (Express just serves the broken file byte-for-byte; only a
+real browser's module loader would throw):**
+- `node --check` on all 12 files, locally and again after scp to the remote.
+- **Exhaustive export/import cross-reference**: extracted every `export` from every file and
+  every `import {...} from './x.js'` line across the whole tree, diffed them — zero missing
+  exports, zero typos. Caught one real bug this way before it ever reached a syntax check:
+  `characters.js`'s new `updateRemotePlayers` called `isOccludedBetween`/`localListenerPos`
+  without importing them.
+- **Orphan audit against the full original inventory**: extracted all 113 original top-level
+  function names and all 140 top-level variable names from the pre-refactor file, confirmed
+  every single one still exists somewhere in the new tree — nothing silently dropped.
+- **Bare-reference sweep** on the ~24 trickiest shared-state names (`playerX`, `pitch`, `yaw`,
+  `localAlive`, `camera`, `scene`, `sceneReady`, `falling`, etc.) — grepped every remaining
+  non-`state.`-prefixed occurrence across the whole tree and hand-confirmed each one is inside
+  a comment, not a missed rewrite spot. Zero misses.
+- **Cycle assertion**: confirmed `net.js`'s only local import is `./state.js`.
+- **DOM id audit**: 47 unique `getElementById` ids in the original file, 47 in the new tree,
+  identical sets (one apparent mismatch, `grenadeCountEl`, is expected — it's created at
+  runtime inside `buildWeaponBar()` via `innerHTML`, not present in the static `index.html`,
+  same as the original code).
+- **Live deploy check**: syntax-checked all 12 files on the remote, `pm2 restart` came up
+  clean, then curl-verified `index.html` + `client.js` + all 11 `/js/*.js` paths individually —
+  every one reachable and 200.
+
+**What this doesn't cover, said plainly**: none of the above proves the game actually *runs*
+correctly end to end — a browser's ES module loader is the only thing that would surface a
+subtle runtime mismatch (e.g., an execution-order assumption between two modules) that static
+analysis and grep can't fully rule out. This is a much larger, more structural change than any
+prior batch, so **a real live playtest matters more here than usual** — join a room on both
+maps, move/jump/crouch/prone, fire all four weapons, reload, throw a grenade, get a kill and a
+death (checking the new death-fall/respawn sequence still works), check the minimap, chat/menu/
+pause flows, and a second client for multiplayer sync — before trusting this the way the last
+53 batches' smaller, narrower changes could be trusted off static verification alone. The
+pre-refactor `client.js` is preserved locally
+(`scratchpad/ruins/client.js.pre-refactor-backup`) and in git history on the remote for an
+instant revert if anything surfaces.
+
+## Batch 55 (2026-09-17): DONE — fixed the client.js/js module import paths after the refactor
+
+User reported being stuck on the login screen right after batch 54's module split deployed.
+Screenshot showed every `/js/*.js` file 404ing, initiated from `client.js`'s own import lines.
+
+**Real bug, found immediately from the screenshot:** `client.js` lives at the site root
+(`/client.js`), but its 11 import lines used bare `./state.js`-style relative paths — which
+resolve relative to `client.js`'s OWN location (site root), giving `/state.js`, not
+`/js/state.js` where the files actually live. The modules' imports of EACH OTHER were all
+correct (they're siblings inside `/js/`, e.g. `audio.js`'s `import ... from './state.js'`
+correctly resolves to `/js/state.js`) — only the 11 lines in the bootstrap itself were wrong.
+Fixed by prefixing all 11 with `./js/` (`from './js/state.js'`, etc.).
+
+**Why this got past the batch 54 verification:** every check run before deploying was either a
+syntax check (doesn't touch import resolution at all) or a cross-reference of export NAMES
+against import NAMES (would never catch a wrong PATH, since the names matched perfectly) — the
+one gap explicitly flagged in that batch's own note ("none of the above proves the game
+actually runs... a browser's ES module loader is the only thing that would surface" this
+exact class of issue) turned out to be exactly what broke. Noted for next time: any refactor
+that changes a file's DIRECTORY relative to files it imports needs an explicit check of each
+import's resolved path against the actual deployed file layout, not just that the import
+graph's names line up.
+
+Fixed both `audio.js` and `weapons.js` in the same deploy... no wait, that's the NEXT bug — see
+below, this batch was import-paths only. Syntax-checked, deployed, pm2 restarted clean, curl-
+verified the live client.js now reads `./js/state.js` etc for all 11 imports.
+
+## Batch 56 (2026-09-17): DONE — reload sound didn't stop when switching weapons mid-reload
+
+User: switching weapons while a reload is in progress cancelled the reload state/UI but the
+reload sound effect kept playing to completion regardless.
+
+**Real bug:** `sfx.reload(w)` (audio.js) fired the reload clip via `playBuffer()` but never
+returned the resulting `BufferSource` — so `weapons.js` had no handle to it at all, meaning
+`cancelReload()` (already correctly called from `setWeapon()` on every weapon switch) could
+only hide the UI ring and clear the reload state, with nothing available to actually stop the
+audio. This is the exact same "no handle kept, so nothing can stop it early" class of bug this
+project has fixed before for the AKM spray loop and remote gun loops — reload was simply never
+given the same treatment when it moved from an instant action to a real timed one.
+
+**Fix:** `sfx.reload(w)` now returns `playBuffer(...)`'s result (one-line change per branch,
+mirroring how every other stoppable sound in this codebase already returns its source).
+`weapons.js`'s `reload()` captures it into a new `reloadSoundSource` handle; `cancelReload()`
+stops it (try/catch, in case it already finished) before clearing the reload state — same
+pattern as `stopAkmLoop`/`stopRemoteGunLoop`. `updateReload()`'s natural-completion path clears
+the handle too (nothing to stop, it already finished on its own).
+
+Verified before deploying: confirmed `cancelReload()` really is called from every weapon-switch
+path (`setWeapon`'s `cancelReload();` call, unchanged from before). Syntax-checked both files
+locally and on remote, pm2 restarted clean, grep-confirmed `reloadSoundSource` is live in the
+served `weapons.js`.
