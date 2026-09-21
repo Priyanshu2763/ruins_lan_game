@@ -536,7 +536,7 @@ export function initScene(mapKey, memeMode) {
   state.scene.fog = new THREE.Fog(dusk ? 0x4a3826 : 0xbcdcf0, 45, 230);
   buildHorizon(theme);
 
-  state.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
+  state.camera = new THREE.PerspectiveCamera(state.fov, window.innerWidth / window.innerHeight, 0.1, 500);
   state.yawObject = new THREE.Object3D();
   state.yawObject.add(state.camera);
   state.scene.add(state.yawObject);
@@ -620,4 +620,14 @@ export function onResize() {
   state.camera.aspect = window.innerWidth / window.innerHeight;
   state.camera.updateProjectionMatrix();
   state.renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// Settings tab's FOV slider — live while in a match (camera exists), otherwise just updates
+// state.fov, which initScene reads at camera-creation time for the next match joined.
+export function setFov(v) {
+  state.fov = v;
+  if (state.camera) {
+    state.camera.fov = v;
+    state.camera.updateProjectionMatrix();
+  }
 }

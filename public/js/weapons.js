@@ -6,130 +6,31 @@ import {
 import { state } from './state.js';
 import { sfx, playBuffer, playPositionalOneShot, playPositionalLoopStart, updatePositionalTarget } from './audio.js';
 import { sendMsg } from './net.js';
+import { initViewmodel, kickViewmodel, setViewmodelAmmo, setTriggerHeld, throwKick, setViewmodelWeapon, startReloadAnim, cancelReloadAnim, raiseViewmodel, getMuzzleWorld, grenadeReady, grenadeThrow, grenadeCancel, isGrenadeBusy, onGrenadePin } from './viewmodel.js';
 
 const crosshair = document.getElementById('crosshair');
 const weaponBar = document.getElementById('weaponBar');
 
-// ---------- First-person viewmodel guns (dummy shapes) + fire effects ----------
-const viewmodels = []; // one Group per weapon index, child of camera
-const MUZZLE_LOCAL = []; // local offset (relative to camera) of each weapon's muzzle tip
-let muzzleFlash, flashTimeMs = 0;
-let recoilKick = 0; // 0..1, decays each frame, drives viewmodel kick + knife swing
-
-function addBox(parent, w, h, d, x, y, z, color) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0.6 }));
-  mesh.position.set(x, y, z);
-  parent.add(mesh);
-  return mesh;
-}
-
-function buildRifleViewmodel({ long, scope }) {
-  const g = new THREE.Group();
-  const barrelLen = long ? 0.85 : 0.55;
-  addBox(g, 0.09, 0.09, barrelLen, 0, 0.02, -barrelLen / 2 - 0.15, 0x2b2b2b); // barrel
-  addBox(g, 0.14, 0.16, 0.4, 0, -0.05, 0.05, 0x3a3226); // body/stock
-  addBox(g, 0.06, 0.18, 0.1, 0, -0.16, -0.02, 0x2b2b2b); // magazine
-  if (scope) addBox(g, 0.06, 0.06, 0.22, 0, 0.11, -0.25, 0x1c1c1c); // scope
-  g.userData.muzzleZ = -barrelLen - 0.15;
-  return g;
-}
-
-function buildPistolViewmodel() {
-  const g = new THREE.Group();
-  addBox(g, 0.09, 0.14, 0.32, 0, 0.02, -0.14, 0x2b2b2b); // slide/barrel
-  addBox(g, 0.09, 0.2, 0.1, 0, -0.14, 0.06, 0x3a3226); // grip
-  g.userData.muzzleZ = -0.3;
-  return g;
-}
-
-function buildKnifeViewmodel() {
-  const g = new THREE.Group();
-  addBox(g, 0.05, 0.05, 0.18, 0, -0.02, 0.05, 0x4a3a26); // handle
-  addBox(g, 0.03, 0.14, 0.32, 0, 0.02, -0.2, 0xcfd4d8); // blade
-  g.userData.muzzleZ = -0.36;
-  return g;
-}
-
-export function initViewmodels() {
-  const specs = [
-    buildRifleViewmodel({ long: false, scope: false }), // Vulcan Rifle
-    buildRifleViewmodel({ long: true, scope: true }),   // Hawk Marksman
-    buildPistolViewmodel(),                              // Sidearm Pistol
-    buildKnifeViewmodel(),                                // Combat Knife
-  ];
-  for (const g of specs) {
-    g.position.set(0.32, -0.28, -0.55);
-    g.visible = false;
-    state.camera.add(g);
-    viewmodels.push(g);
-    MUZZLE_LOCAL.push(new THREE.Vector3(0.32, -0.28 + 0.03, -0.55 + g.userData.muzzleZ));
-  }
-  viewmodels[0].visible = true;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = 64; canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-  grad.addColorStop(0, 'rgba(255,240,180,1)');
-  grad.addColorStop(0.4, 'rgba(255,190,80,0.9)');
-  grad.addColorStop(1, 'rgba(255,120,20,0)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, 64, 64);
-  const flashMat = new THREE.SpriteMaterial({
-    map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false, blending: THREE.AdditiveBlending,
-  });
-  muzzleFlash = new THREE.Sprite(flashMat);
-  muzzleFlash.scale.set(0, 0, 0);
-  state.camera.add(muzzleFlash);
-}
-
-// grenades.js's explosion flash reuses this same sprite texture rather than importing THREE
-// and building its own — this getter is the only thing it needs from here.
-export function getMuzzleFlashTexture() { return muzzleFlash.material.map; }
+// ---------- First-person viewmodel + fire effects ----------
+// The arms/gun rig, its motion and its render pass live in viewmodel.js — this module only tells it
+// what happened (a shot, a reload, a weapon switch) and spawns the tracer.
+export { getMuzzleFlashTexture } from './viewmodel.js';
+export function initViewmodels() { initViewmodel(); }
+onGrenadePin(() => sfx.grenadePin()); // the pin sound plays at the moment the pin comes out of the grenade
 
 function triggerFireEffects(weaponIdx) {
-  recoilKick = 1;
-  const weapon = WEAPONS[weaponIdx];
-  if (weapon.type === 'melee') return;
-  const m = MUZZLE_LOCAL[weaponIdx];
-  muzzleFlash.position.copy(m);
-  muzzleFlash.material.opacity = 1;
-  muzzleFlash.scale.set(0.28, 0.28, 0.28);
-  flashTimeMs = 70;
-
-  // brief forward tracer from the muzzle world position
-  const origin = new THREE.Vector3();
+  kickViewmodel(weaponIdx, ammo[weaponIdx].mag === 0); // (the Glock's slide stays back on the last round)
+  if (WEAPONS[weaponIdx].type === 'melee') return;
+  // brief forward tracer from the real muzzle position
   const dir = new THREE.Vector3();
-  state.camera.getWorldPosition(origin);
   state.camera.getWorldDirection(dir);
-  const worldMuzzle = m.clone();
-  state.camera.localToWorld(worldMuzzle);
+  const worldMuzzle = getMuzzleWorld(state.camera);
   const end = worldMuzzle.clone().addScaledVector(dir, 12);
   const geo = new THREE.BufferGeometry().setFromPoints([worldMuzzle, end]);
   const mat = new THREE.LineBasicMaterial({ color: 0xfff2b0, transparent: true, opacity: 0.8 });
   const line = new THREE.Line(geo, mat);
   state.scene.add(line);
   setTimeout(() => { state.scene.remove(line); geo.dispose(); mat.dispose(); }, 70);
-}
-
-export function updateViewmodelKick(dt) {
-  recoilKick = Math.max(0, recoilKick - dt * 9);
-  const active = viewmodels[currentWeapon];
-  if (active) {
-    if (WEAPONS[currentWeapon].type === 'melee') {
-      active.rotation.z = -recoilKick * 1.1;
-      active.position.z = -0.55 - recoilKick * 0.15;
-    } else {
-      active.position.z = -0.55 + recoilKick * 0.12;
-      active.rotation.x = -recoilKick * 0.22;
-    }
-  }
-  if (flashTimeMs > 0) {
-    flashTimeMs -= dt * 1000;
-    const t = Math.max(0, flashTimeMs / 70);
-    muzzleFlash.material.opacity = t;
-    muzzleFlash.scale.set(0.28 * t, 0.28 * t, 0.28 * t);
-  }
 }
 
 // ---------- Ammo + weapon card bar ----------
@@ -179,6 +80,7 @@ export function updateWeaponBar() {
     ammoEl.textContent = w.magSize == null ? '—' : `${ammo[i].mag}/${ammo[i].reserve}`;
   });
   grenadeCountEl.textContent = String(grenadeCount);
+  setViewmodelAmmo(currentWeapon, ammo[currentWeapon].mag);
 }
 
 let currentWeapon = 0;
@@ -189,7 +91,7 @@ export function setWeapon(idx) {
   cancelReload(); // switching weapons drops any in-progress reload, no ammo change
   stopFiring(); // switching away mid-hold shouldn't leave a stale interval/spray loop running
   currentWeapon = idx;
-  for (let i = 0; i < viewmodels.length; i++) viewmodels[i].visible = i === idx;
+  setViewmodelWeapon(idx);
   updateWeaponBar();
 }
 updateWeaponBar();
@@ -205,17 +107,19 @@ let reloadSoundSource = null;
 export function reload() {
   const w = WEAPONS[currentWeapon];
   if (w.magSize == null || !w.reloadTime) return; // melee — nothing to reload
-  if (reloadState) return; // already reloading
+  if (reloadState || isGrenadeBusy()) return; // already reloading, or hands are on the grenade
   const a = ammo[currentWeapon];
   if (w.magSize - a.mag <= 0) return;
   if (a.reserve <= 0) { sfx.empty(); return; }
   const now = performance.now();
   reloadState = { idx: currentWeapon, startedAt: now, endsAt: now + w.reloadTime, duration: w.reloadTime };
   reloadSoundSource = sfx.reload(w);
+  startReloadAnim(w.reloadTime);
   const ring = weaponCardEls[currentWeapon].querySelector('.reloadRing');
   if (ring) ring.hidden = false;
 }
 function cancelReload() {
+  cancelReloadAnim();
   if (!reloadState) return;
   if (reloadSoundSource) { try { reloadSoundSource.stop(); } catch { /* already finished */ } reloadSoundSource = null; }
   const ring = weaponCardEls[reloadState.idx].querySelector('.reloadRing');
@@ -261,9 +165,10 @@ export function stopAkmLoop() {
 export function stopFiring() {
   if (fireIntervalId) { clearInterval(fireIntervalId); fireIntervalId = null; }
   stopAkmLoop();
+  setTriggerHeld(false);
 }
 document.addEventListener('mousedown', (e) => {
-  if (!state.pointerLocked || e.button !== 0) return;
+  if (!state.pointerLocked || e.button !== 0 || state.chatOpen || isGrenadeBusy()) return;
   const w = WEAPONS[currentWeapon];
   // Checked BEFORE fire() runs, not after — this has to be "was there a bullet to fire",
   // not "is the mag still non-empty now": firing the LAST bullet legitimately drops the mag
@@ -274,6 +179,7 @@ document.addEventListener('mousedown', (e) => {
   // outcome, so clicking an already-empty AKM leaked the spray-loop clip for ~110ms (one tick)
   // before the interval's next fire() call caught the still-empty mag and stopped it.
   const hadAmmo = w.magSize == null || ammo[currentWeapon].mag > 0;
+  if (hadAmmo) setTriggerHeld(true);
   fire();
   if (w.auto && hadAmmo) fireIntervalId = setInterval(fire, w.fireInterval);
   if (w.id === 0 && hadAmmo) akmLoopSource = playBuffer('akmFire', { loop: true });
@@ -282,7 +188,7 @@ document.addEventListener('mouseup', () => { stopFiring(); });
 
 let lastLocalFire = 0;
 function fire() {
-  if (!state.localAlive || !state.sceneReady) return;
+  if (!state.localAlive || !state.sceneReady || isGrenadeBusy()) return;
   const w = WEAPONS[currentWeapon];
   const now = performance.now();
   if (now - lastLocalFire < w.fireInterval - 5) return;
@@ -337,9 +243,12 @@ export function startGrenadeAim() {
   if (!state.localAlive || !state.sceneReady || !state.pointerLocked || grenadeAiming) return;
   if (grenadeCount <= 0) { sfx.empty(); return; }
   if (performance.now() - lastGrenadeThrow < GRENADE_COOLDOWN_MS) return;
+  cancelReload(); // hands are busy — same as switching weapons: no partial reload
+  stopFiring();
   grenadeAiming = true;
   trajectoryLine.visible = true;
   trajectoryMarker.visible = true;
+  grenadeReady();
 }
 
 export function releaseGrenadeThrow() {
@@ -351,13 +260,17 @@ export function releaseGrenadeThrow() {
   lastGrenadeThrow = performance.now();
   grenadeCount = Math.max(0, grenadeCount - 1);
   updateWeaponBar();
+  // Aim is locked in at the moment G is released; the throw itself leaves the hand a beat later, at the
+  // release point of the overhand animation (viewmodel.js), so the grenade appears when the arm lets go.
   const origin = new THREE.Vector3();
   const dir = new THREE.Vector3();
   state.camera.getWorldPosition(origin);
   state.camera.getWorldDirection(dir);
-  sendMsg({ type: 'throwGrenade', origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] });
-  recoilKick = 1; // reuse the existing viewmodel kick as a simple throw animation
-  sfx.grenadeThrow();
+  grenadeThrow(() => {
+    if (!state.localAlive || !state.sceneReady) return;
+    sendMsg({ type: 'throwGrenade', origin: [origin.x, origin.y, origin.z], dir: [dir.x, dir.y, dir.z] });
+    sfx.grenadeThrow();
+  });
 }
 
 // Called from ui.js's pointerlockchange handler — losing focus/lock mid-hold (alt-tab, etc.)
@@ -365,6 +278,7 @@ export function releaseGrenadeThrow() {
 // trajectoryLine/trajectoryMarker themselves. No-ops if not currently aiming.
 export function cancelGrenadeAim() {
   if (!grenadeAiming) return;
+  grenadeCancel();
   grenadeAiming = false;
   trajectoryLine.visible = false;
   trajectoryMarker.visible = false;
@@ -464,7 +378,24 @@ export function handleRemoteShot(msg) {
 }
 
 // ---------- Loadout reset (new spawn / new match) + incoming ammo/grenade pickups ----------
+// Snapshot/restore of what the player is carrying (ammo per weapon, grenades, which weapon is
+// out). Ammo is client-side state, so without this a page refresh mid-match — which the reconnect
+// flow now survives — would quietly hand back full magazines.
+export function getLoadout() {
+  return { weapon: currentWeapon, grenades: grenadeCount, ammo: ammo.map((a) => ({ mag: a.mag, reserve: a.reserve })) };
+}
+export function applyLoadout(l) {
+  if (!l || !Array.isArray(l.ammo) || l.ammo.length !== ammo.length) return;
+  l.ammo.forEach((a, i) => {
+    if (ammo[i].mag != null) { ammo[i].mag = Math.max(0, Math.min(WEAPONS[i].magSize, a.mag | 0)); ammo[i].reserve = Math.max(0, Math.min(WEAPONS[i].reserveMax, a.reserve | 0)); }
+  });
+  grenadeCount = Math.max(0, Math.min(GRENADE_MAX_CARRY, l.grenades | 0));
+  if (Number.isInteger(l.weapon) && WEAPONS[l.weapon]) setWeapon(l.weapon);
+  updateWeaponBar();
+}
+
 export function resetLoadout() {
+  raiseViewmodel();
   WEAPONS.forEach((w, i) => { ammo[i] = { mag: w.magSize, reserve: w.reserveMax }; });
   grenadeCount = GRENADE_START_COUNT;
   updateWeaponBar();

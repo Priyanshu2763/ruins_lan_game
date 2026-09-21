@@ -1,20 +1,15 @@
 import * as THREE from 'three';
-import { GRENADE_VISUAL_RADIUS, GRENADE_IMAGE, GRENADE_BLAST_RADIUS } from '/shared/gameData.js';
+import { GRENADE_BLAST_RADIUS } from '/shared/gameData.js';
 import { state } from './state.js';
 import { sfx, dryPositionFor, applyOcclusionParams, isOccludedBetween, localListenerPos } from './audio.js';
-import { loadPhotoTexture } from './world.js';
+import { createGrenade, setPinVisible } from './grenadeModel.js';
 import { getMuzzleFlashTexture } from './weapons.js';
 
 // ---------- Grenades: flying projectile meshes + explosion VFX ----------
-// A real small grenade-sized object using the actual photo (on the cap faces, like the ammo
-// crate lid) instead of an oversized glowing red sphere — a dim point light still makes it
-// spottable at range without the mesh itself reading as a giant ball.
-const grenadeMeshes = new Map(); // id -> { mesh, targetPos }
-const grenadeSideMat = new THREE.MeshStandardMaterial({ color: 0x3a4a2e, emissive: 0xff2200, emissiveIntensity: 0.2, roughness: 0.45, metalness: 0.4 });
-const grenadeCapTex = loadPhotoTexture(`/images/${GRENADE_IMAGE}`);
-const grenadeCapMat = new THREE.MeshStandardMaterial({ map: grenadeCapTex, roughness: 0.5, metalness: 0.15 });
-const grenadeGeo = new THREE.CylinderGeometry(GRENADE_VISUAL_RADIUS, GRENADE_VISUAL_RADIUS, GRENADE_VISUAL_RADIUS * 1.3, 14);
-const grenadeMats = [grenadeSideMat, grenadeCapMat, grenadeCapMat]; // [side, top, bottom]
+// The thrown grenade is the real fragmentation-grenade model (grenadeModel.js) — no more red glowing
+// cylinder/point light. It rolls as it travels, proportionally to the distance moved.
+const grenadeMeshes = new Map(); // id -> { mesh, targetPos, tick }
+const GRENADE_WORLD_SCALE = 0.11; // model body radius is 1 -> 11cm here: a little oversize so it reads at range, and sits on the ground properly
 
 export function syncGrenades(list) {
   const seen = new Set();
@@ -22,10 +17,10 @@ export function syncGrenades(list) {
     seen.add(g.id);
     let gm = grenadeMeshes.get(g.id);
     if (!gm) {
-      const mesh = new THREE.Mesh(grenadeGeo, grenadeMats);
+      const mesh = createGrenade(); // the M67 (or the built-in stand-in until it has loaded); shares geometry/materials, cheap
+      setPinVisible(mesh, false); // a thrown grenade has already had its pin pulled
+      mesh.scale.setScalar(GRENADE_WORLD_SCALE);
       mesh.position.set(g.pos[0], g.pos[1], g.pos[2]);
-      const light = new THREE.PointLight(0xff3300, 0.7, 3.5);
-      mesh.add(light);
       state.scene.add(mesh);
       gm = { mesh, targetPos: new THREE.Vector3(), tick: null };
       grenadeMeshes.set(g.id, gm);
@@ -47,7 +42,14 @@ export function syncGrenades(list) {
 // latest network position and keeps its ticking sound's panner tracking that same live position.
 export function updateGrenades(dt) {
   for (const gm of grenadeMeshes.values()) {
+    const before = gm.mesh.position.clone();
     gm.mesh.position.lerp(gm.targetPos, Math.min(1, dt * 12));
+    // tumble: roll about the axis perpendicular to the direction of travel, by distance / radius
+    const move = gm.mesh.position.clone().sub(before), dist = move.length();
+    if (dist > 1e-5) {
+      const axis = new THREE.Vector3(0, 1, 0).cross(move).normalize();
+      if (axis.lengthSq() > 0.5) gm.mesh.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, dist / (GRENADE_WORLD_SCALE * 1.4)));
+    }
     if (gm.tick) {
       const p = gm.mesh.position;
       const pos = [p.x, p.y, p.z];

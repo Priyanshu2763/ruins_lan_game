@@ -1934,3 +1934,418 @@ decal's random rotation/size, it's clipped flush to the button's own rounded rec
 impossible for it to spill outside anymore, not just less likely to.
 
 Syntax-checked, deployed, pm2 restarted clean.
+
+## Batch 59 (2026-09-18): DONE — dashboard overhaul: 3D character preview, richer Profile, BGMI-style Settings
+
+**Play + Character panes** now have a framed "operator card" beside the content
+(`#playPreviewSlot` / `#characterPreviewSlot`). `public/js/preview.js` owns ONE shared
+three.js scene/canvas that `mountPreviewInto()` reparents into whichever pane is active (single
+WebGL context, single RAF loop; stopped when neither pane is visible or the Play modal covers
+the dashboard). Color pickers update the figure live before Save.
+
+**Profile:** identity header (avatar tinted with the player's color, member-since, BGMI-style
+rank badge Bronze→Ace computed client-side from lifetime kills) + 6 stat cards. New real stat:
+`player_stats.wins` (schema.sql `ALTER ... ADD COLUMN IF NOT EXISTS`), credited in `endMatch()`
+to the top-kills CONNECTED player only, and only if kills > 0. `/api/profile` also returns
+`wins` + `memberSince`. Verified with a live two-client test (kills:1, wins:1 after a real
+kill + auto-ended 6s match).
+
+**Settings**, every control wired to a real mechanism: Master/Music/Effects volume (audio.js now
+has musicGain + sfxGain feeding masterGain; `playBuffer` takes `bus:'music'|'sfx'`, only
+background music uses 'music'), mouse sensitivity, FOV (`setFov` in world.js, live on the camera),
+Sprint Mode hold/toggle (`state.toggleSprint`, Shift keydown flips `sprintToggledOn` in client.js,
+auto-cancels when movement stops). No ADS/shadow controls — the engine has neither, so they
+would have been fake.
+
+**Bug fixed after user report ("you box empty, no button works"):** `showDashboard()` was invoked
+at module load, before the `const`s it transitively reads (`playPreviewSlot`, `activePane`) were
+declared → temporal-dead-zone ReferenceError that killed the rest of `ui.js`, so no listener
+after that point was ever attached. Moved the initial-screen trigger to the LAST statement of
+`ui.js`. Not catchable by node --check / curl / import-export cross-reference.
+
+## Batch 60 (2026-09-18): DONE — face + cap on the character, secondary color now real
+
+Eyes on the -Z (front) face and a cap with a brim (brim = the silhouette that reads at distance)
+so front/back is obvious. Secondary color, previously "reserved", now drives the cap; threaded
+hello → `ws.secondaryColor` → `player.secondaryColor` → `joined`/`state` broadcast →
+`syncRemotePlayer`, live-previewed in the Character tab. Verified round-trip with a live ws test.
+
+## Batch 61 (2026-09-18): DONE — real 3D models replace the box figures; login regression fixed
+
+**Assets (all Quaternius, CC0, user downloaded the zips — itch.io widget downloads can't be
+scripted):** Universal Base Characters (Superhero_Male, rigged UE-style skeleton, ~1.82 units
+tall with feet at y≈0 so it matches the engine's scale with no rescale), Universal Animation
+Library (43 clips; used Idle_Loop / Walk_Loop / Sprint_Loop / Crouch_Idle_Loop /
+Crouch_Fwd_Loop on the SAME bone names as the character, so clips play with no retargeting),
+Ultimate Guns Pack (FBX only in the free tier: AssaultRifle_1→AKM, Shotgun_1, Pistol_1→Glock,
+Bayonet→knife). Files live in `public/models/`, original filenames kept (renaming the .gltf broke
+its internal buffer URI). Two texture names the gltf references (`T_Eye_Normal_png.png`,
+`T_Hair_1_Normal_png.png`) don't exist in the pack (Quaternius packaging quirk); supplied
+copies of the correct normal maps under those names.
+
+**Code:** `characters.js` rewritten — async template preload at module load (same pattern as
+audio.js), `buildCharacterFigure` clones via SkeletonUtils `clone`, tints the `MI_Superhero_Male`
+material per instance, parents a procedural cap to the `Head` bone and per-weapon FBX guns to
+`hand_r`, one `AnimationMixer` per figure with 0.25s crossfades. Prone still rotates the whole
+rig flat (no prone clip exists) but over a crouch pose; the old `CROUCH_SCALE_Y` squash is gone
+from the client (still exported for the server's headshot band). `createRemote` queues if the
+template isn't loaded; `syncRemotePlayer` returns early and retries next tick. Server serves
+`node_modules/three/examples/jsm` at `/vendor/three-examples`.
+
+**Login regression (user: "login page not working") — root cause:** I wrote
+`import { SkeletonUtils } from '.../SkeletonUtils.js'` but that file exports `clone`, `retarget`,
+`retargetClip` individually — no `SkeletonUtils` binding exists. A missing named export is a
+link-time SyntaxError, and because ui.js → preview.js → characters.js, the whole ui.js module
+(all auth listeners) failed. Fixed to `import { clone as cloneSkinned }`. I had grepped the
+export shape for GLTFLoader/FBXLoader but ASSUMED it for SkeletonUtils. Afterward walked the
+entire vendor import graph (7 modules): every file resolves, every named import matches.
+
+**Known first-pass estimates needing a real look (no browser available here):** gun
+position/rotation in the hand (`inst.position/rotation` in `buildCharacterFigure`), FBX gun
+scale (trusting FBXLoader's unit handling), cap fit on the real head, animation crossfade feel,
+and the headshot constants (`HEAD_CENTER_Y`/`HEAD_HALF` in gameData.js) which were tuned for the
+old box head and are close to, but not verified against, this model. Bundled hair meshes were
+NOT integrated (they need re-skinning to this skeleton); the procedural cap stays instead.
+
+## Batch 62 (2026-09-21): DONE — giant-gun "blob" fixed, cap removed, guns actually held (verified by rendering)
+
+User screenshots: a huge black rock-like shape in the world, and a loose box floating above the
+character's head. Two causes, one bug each:
+- **The blob was another player's gun, ~100x too big.** Measured the FBX bounding boxes in Node
+  (`FBXLoader.parse` works headlessly for untextured FBX): AKM is 310 units long, shotgun 521,
+  glock 182, knife 117 — cm-scale exports, and FBXLoader does not convert. `normalizeGun()` in
+  characters.js now scales each gun from its MEASURED length to a real-world target
+  (`GUN_FIT`: AKM 0.9, shotgun 1.0, glock 0.2, knife 0.3) and re-pivots it to the grip point.
+  (The Character preview looked fine only because its camera sat INSIDE the giant gun, where
+  back-faces are culled.)
+- **Cap removed** entirely (characters.js, preview.js, ui.js, client.js) and the Character tab's
+  secondary-color picker with it, since it had no remaining visual hook. `secondaryColor` still
+  exists in the DB / API / hello / broadcasts, untouched and harmless, for a future use.
+
+Also found by rendering: the model faces +Z but the game's forward is -Z, so remote players
+would have faced backwards. `buildCharacterFigure` now wraps the model in an outer Group
+(`model.rotation.y = PI`); prone rotation/yaw apply to the outer group, the mixer binds to the
+inner model. Guns were hanging down the forearm; measured hand_r's real axes in the idle pose
+(local +Y runs down the arm to the fingers) and built `GUN_IN_HAND_QUAT` from them so barrels
+point forward with sights up. Verified in a side-view render: AKM, shotgun, glock, knife all
+read correctly. Preview camera pulled back (`1.1, 4.3`) so feet aren't cropped.
+
+**Verification method changed this batch:** headless Chrome IS available (`google-chrome`), and
+driving it over the DevTools protocol with the already-installed `ws` package gives real console
+errors AND screenshots (`--screenshot` alone returned blank pages here; CDP `Page.captureScreenshot`
+worked). Logged-in dashboard rendered by seeding `localStorage.ruins_auth` before navigation.
+Known remaining: the model is a near-naked body, so the primary color tints skin as well as the
+shorts (muddy olive at some colors) — real clothing needs the Modular Outfits pack or a
+per-region material split; walk/sprint arm swing tilts the gun a little (attachment is fixed to
+the idle-pose orientation).
+
+## Batch 63 (2026-09-21): DONE — proper two-handed rifle stance (arm IK), verified by rendering
+
+User: the character held the AKM "like a stick" (gun glued to the right hand, arm hanging).
+Real fix, not a better attachment point: `characters.js` now poses both arms around the gun
+every frame. The guns (AKM/shotgun/glock) ride an `aim` anchor on the model whose ORIENTATION
+is fixed to model-forward and whose POSITION follows spine_03 plus a mounting offset swung by the
+torso's lean from bind pose (parenting it to the spine outright made the barrel point at the
+floor in the crouch clip; ignoring lean put the gun at head height in a crouch). `updateFigure`
+(exported; used by remote players AND preview.js) = `mixer.update` then `solveArm` for each arm:
+analytic two-bone IK (bone lengths read from the live pose, elbow pushed toward `ELBOW_POLE`),
+right hand oriented via the measured hand↔gun relation, left hand palm-up under the handguard
+(measured: hand_l +X = palm normal, +Y = fingers). Reach is the constraint: arms are ~0.545 long
+so the gun must sit close in at chest height (`AIM_POS`) or the left hand can't reach it. Knife
+stays a one-handed grip on hand_r. `setFigureWeapon(fig, id)` swaps visibility + which grips
+apply. Legs/torso still come from the real Idle/Walk/Sprint/Crouch clips.
+Verified in side/front/three-quarter renders for idle, walk and crouch, and on the real
+dashboard card.
+
+**Follow-up checks of the gaps above (same day), all rendered:** sprint (4 stride frames) and
+crouch-walk (3 frames) hold the stance with no arm breakage; hands are the model's own curled
+fists, which read as gripping the pistol grip / supporting under the handguard, so no finger work
+was needed. **Prone was actually broken** (found only by rendering): a crouch pose laid flat came
+out curled up, and because the rig is laid flat by rotating the outer group, model-forward points
+at the GROUND, so the rifle pointed into the floor. Fixed with a separate prone aim pose
+(`AIM_POS_PRONE`/`AIM_FORWARD_PRONE`/`AIM_UP_PRONE`/`ELBOW_POLE_PRONE`: gun along the body axis
+ahead of the chest, elbows out and toward the ground), a straight-bodied `Idle_Loop` as the prone
+base clip, and `fig.prone` set from `rp.prone` each frame. Verified side + top view.
+
+## Batch 64 (2026-09-21): DONE — appearance / closet system (2 bodies, skin spectrum, wardrobe)
+
+User: replace the color palette with a white→black skin-tone spectrum, more characters, a closet.
+Only two bodies exist in the free Quaternius pack (Superhero Male + Female) — both are used, and
+variety comes from multiplying them by hair / clothes / skin. The Male body reads a bit "monster"
+(heavy proportions); kept as a selectable "Superhero" build. A more normal male needs a different
+pack — options told to the user: Universal Base Characters "Regular/Teen" (same rig, so all the
+dress/IK code below would work unchanged, paid ~$20, price unconfirmed), Quaternius Ultimate
+Modular Men (free CC0, different skeleton → needs retargeting), Mixamo (free Adobe login,
+different skeleton).
+
+- `shared/appearance.js` (client UI + renderer + server all import it): `SKIN_TONES` (12 shades,
+  `#fbeee4`→`#241510`), hair/cloth palettes, `SLOTS` menus, `DEFAULT_APPEARANCE`,
+  `sanitizeAppearance()` (unknown ids / bad hex → defaults, so a stale DB row can't break a
+  render), `guestAppearance(id)` (deterministic spread for guests). Stored as JSONB in
+  `player_customization.appearance` (schema.sql `ADD COLUMN IF NOT EXISTS`); `POST
+  /api/customization` takes `{username, appearance}` and sanitizes; `hello` and `joined`/`state`
+  carry `appearance`.
+- Skin tint: the shipped skin textures had a tan baked in, so neutral gray detail maps were
+  generated (`public/models/character/T_Skin_*_Neutral.png`, average sRGB 0.75); the tone colour is
+  multiplied by 1/0.5225 (linear) to compensate. Hair meshes are re-skinned onto the body
+  skeleton by bone-name remap of `skinIndex`; hair tint scaled 1/0.275.
+- Wardrobe (`public/js/dress.js`): clothes are SkinnedMesh copies of the body geometry bound to
+  the SAME skeleton (so they animate with it for free), with a per-vertex `clothW` mask built
+  from skin weights (+ along-bone fraction for tank straps, + bind-height `minY`), inflated in
+  the vertex shader (`onBeforeCompile`), unwanted verts `discard`ed in the fragment shader, and
+  procedural camo noise. One shared program via `customProgramCacheKey`. Items: tank/tee/
+  longsleeve/camojacket, shorts/pants/camopants, sneakers/boots, gloves, beanie/helmet, beard.
+  Known cosmetic nit: slightly jagged bits at the shorts waistline.
+- `characters.js`: `buildCharacterFigure(id, name, appearance)`, `redressFigure`,
+  `setRemoteAppearance`; `preview.js` `setPreviewAppearance` (rebuild on body change, else just
+  redress). Closet UI lives in `ui.js` (`draftAppearance` vs saved `myAppearance`).
+- Fixed a latent bug: repeated `createRemote` before the models finished loading queued/duplicated
+  figures (now guarded by `remotePlayers.has(id)` + pendingCreates dedupe).
+
+**pm2 stale-process trap (cost real time):** after the local migration the pm2 process
+`wreckveil` did not exist any more — an old `ruins-fpp` (pid 1953) was still serving OLD code, and
+`pm2 restart wreckveil >/dev/null` failed silently, so new endpoints looked broken. Fixed with
+`pm2 delete ruins-fpp` + `pm2 start server/index.js --name wreckveil`. Rules: never hide pm2
+output, and check `pm2 list` (name + uptime) before trusting a "deploy". Also: `pkill -f "<pat>"`
+/ `pgrep -f` match the invoking shell itself (exit 144) — kill test servers by pid from
+`ss -ltnp | grep :PORT`.
+
+## Batch 65 (2026-09-21): DONE — reconnect flow + text chat (server + client, browser-verified)
+
+User: "reconnect flow specially". Design: a dropped connection must never cost a match.
+
+**Server (`server/index.js`):** every player gets a secret `token` (sent in `joined` as
+`sessionToken`). On socket close the slot is NOT removed: the player is flagged `disconnected`
+(`dc: true` in state/leaderboard payloads), is invulnerable/untargetable, others get a
+`playerStatus:'disconnected'` + a system chat line, and a `RECONNECT_GRACE_MS` (30s) timer starts.
+`{type:'reconnect', roomId, token}` swaps the new socket into the same player (same id, health,
+score; old socket, if still open, is closed = takeover) and replies `joined` with
+`reconnected:true`, `you:{health,alive,pos}`, and `chat` history (and replays `matchEnded` if the
+match finished meanwhile). Bad token / unknown room / expired grace → `reconnectFailed`. `leave`
+= deliberate quit, frees the slot immediately. Heartbeat ping every 10s (`HEARTBEAT_MS`; a socket that misses a full cycle is terminated) so a
+half-open TCP connection is closed server-side too. Chat: `{type:'chat', text}` → whitespace-
+collapsed, 200 chars, 400ms cooldown, 40-line room history, name set by the server; system lines
+(joined/left/lost connection/reconnected) go through the same `pushChat`.
+
+**Client:** `net.js` is now a self-healing connection (`connectWebSocket({onOpen,onMessage,
+onStatus})`): any close schedules a retry with growing delay (cap 5s); a 2s watchdog abandons a
+socket that has been silent >6s during a live match (half-open connections can sit "OPEN" for
+minutes); `leaveConnection()` = `leave` + stop retrying + clear session. Session
+(`wreckveil_session` = roomId+token) and a 1Hz loadout snapshot (`wreckveil_loadout`: ammo,
+grenades, weapon) live in **sessionStorage** — survives a refresh of this tab, not a new tab /
+browser restart, so nobody is silently teleported into an old match. `client.js` `onOpen` sends
+`hello` then either `reconnect` (if a session exists, banner "Rejoining your match…") or
+`listRooms`. `onJoined` has two resume paths: same page + scene already running →
+`onRejoined()` (resync players/health/alive only, no scene re-init); fresh page (refresh) → full
+init, then `applyLoadout` and, if the server says we were dead, `onLocalDeath`. `reconnectFailed`
+clears the session and reloads to the dashboard. `matchEnded` clears the session. Quit buttons
+call `leaveMatchAndReload()`. Chat UI (`ui.js`): `#chatLog` (fades after 12s, history lines start
+faded), `#chatInput` opened with Enter while pointer-locked, closed by Enter/Esc/losing lock;
+`state.chatOpen` gates movement keys and mouse fire; text is inserted with `textContent` only
+(never HTML). Scoreboard shows an "offline" tag for `dc` players.
+
+**Verification (real headless Chrome via CDP against the live server, plus ws clients):**
+server: 30/30 checks on a test instance (token, drop→grace, invulnerable, reconnect keeps
+id/state, takeover, bad token, chat relay/rate-limit/cap/history, grace expiry, `leave`).
+Browser scenario `rc.mjs` 26/26 (3 consecutive runs): create room, chat both ways + HTML
+injection check, hard socket drop → banner → rejoin same page with same token and no scene reset,
+muted inbound socket → watchdog reconnect, page refresh mid-match resumes slot + chat history,
+Quit frees the slot immediately and the next load is the dashboard. `rc2.mjs` 8/8: real fire
+(pointer lock works in headless with a CDP click) spent 2 rounds, refresh kept 28/180, `pm2
+restart` mid-match → `reconnectFailed` → back on dashboard with the session cleared. `rc3.mjs`
+9/9: Enter opens/focuses the box, typing lands in it, a mouse click while typing does not fire,
+Enter sends, Esc closes. No uncaught page errors in any run. Import/export cross-reference of all
+client modules clean. Test harness scripts live in the session scratchpad only (not in the repo).
+
+Not done / next ideas: first-person viewmodels are still plain black slabs (the real gun models
+are only used on the character figures + dashboard preview); a "Regular" male body (see batch 64);
+tank-top straps and shorts waistline never re-rendered after the last tweak.
+
+## Batch 66 (2026-09-21): DONE — rejoin asks first, hair/gun/cloth polish, real first-person viewmodel
+
+**Rejoin now asks permission.** After a refresh / reopened tab that still has a match session, the
+player sees a "Rejoin your match?" prompt (`#rejoinPrompt`, ui.js `showRejoinPrompt`) instead of being
+dropped into the match. Yes → `reconnect` as before. No → new server message `abandon {roomId, token}`:
+`removePlayer(room, player, {clearStats:true})` takes them out of that room WITHOUT banking their
+kills/deaths into `room.leftStats` (their scoreboard row disappears and a later join of that room by
+the same name starts at 0/0 — the batch-4 name-reclaim can't resurrect them), the old token is dead,
+and the client forgets the session. "Clear the stats" = that room's scoreboard stats; the account's
+lifetime `player_stats` (persisted live per kill) are NOT rolled back. A same-page network blip (scene
+already running) still resumes silently — only a fresh page asks. If the slot expired while the prompt
+was open, Yes shows "That match has ended or your spot expired". Session now also stores `roomName`.
+Verified in headless Chrome: `rc.mjs` 29/29 (prompt appears, does NOT auto-join, server slot still
+held, Yes resumes), `rc4.mjs` 13/13 (No → others see playerLeft, row gone from leaderboard, session
+cleared, no prompt on next load, old token → reconnectFailed, same-name rejoin starts 0/0), `rc2.mjs`
+9/9 (ammo restore now goes through the prompt).
+
+**Hair (Long / Buns looked bald on top with the fringe on the forehead).** Root cause: those meshes
+are authored for the FEMALE head; the male head sits 4.41cm higher (+0.0045 back) — measured from
+the two buzz-cut meshes, which share topology vertex-for-vertex. `dress.js` `HAIR_NATIVE` records which
+body each mesh was authored for and `hairGeometry` shifts it by `MALE_HEAD_OVER_FEMALE` (sign flipped)
+when worn on the other body (also fixes Side Part / Beard on the female). Verified front/side on both.
+
+**Gun in the chest + proportions.** Measured: torso z −0.22…+0.09 at chest height, AKM rear end at
+z −0.16 → 25cm inside the chest. `GUN_FIT` now has `slim` (height/width scale, AKM 0.72, shotgun 0.78,
+glock 0.82; AKM also 0.9→0.84m long); anchor moved to (−0.13, 1.36, 0.30); left-hand grips pulled back
+(reach is ~0.545) so the arms still meet the handguard. Gun materials restyled from near-black Phong
+(#070707…) to lit gunmetal/wood by material NAME (`GUN_MATERIALS`) — also fixes the too-dark world guns.
+
+**Cloth artifacts.** Orange skin patches at the shoulder: tee/tank/shorts `along` ranges started at 0
+so shoulder-cap/hip-top vertices (t<0) were excluded → now start at −1. Jagged hems/waistline: the mask
+is now a soft ramp (`EDGE_ALONG`, `EDGE_Y`) so the fragment discard cuts on the true boundary line, not
+the mesh edges. Thin slits along the sleeve hems: UV-seam vertices share a position but not a normal,
+so inflating each along its own normal pried the seam open — cloth now inflates along `inflN`, a normal
+averaged over coincident vertices.
+
+**First-person viewmodel (replaces the old placeholder boxes + the leftover "Hawk Marksman" model).**
+`characters.js`: `buildFirstPersonRig` = the player's own dressed figure reduced to arms/hands
+(`restrictToArms` filters triangles by arm-bone skin weight, so sleeves/gloves/skin tone match what
+others see), parented under the camera, seated so the shoulders sit just outside the frustum;
+`updateFirstPersonRig(rig, weaponId, pos, euler)` moves the gun anchor in camera space and reuses the
+same two-arm IK (`poseArms`, now factored out of `updateFigure`). Rest pose is re-evaluated each frame
+(`mixer.update(0)`) so IK never accumulates twist. Knife: right hand only, left arm parked behind the
+camera. `viewmodel.js` owns the motion: per-weapon rest pose (`REST`), look-lag sway, breathing, walk/
+sprint bob, sprint carry, recoil kick, reload dip timed to the weapon's real `reloadTime`, raise on
+weapon switch / respawn, knife slash, muzzle flash at the real barrel tip, and its OWN render pass
+(`renderViewmodel`, after the world render, `clearDepth`) so the gun never clips into walls. Tracer now
+starts at the real muzzle. Hidden while dead. `client.js` feeds it the local appearance on join.
+Verified in-game in headless Chrome (idle/walk/sprint/fire/reload/all four weapons/death/respawn,
+no page errors) and in an isolated first-person harness.
+
+Not done / worth a real look: viewmodel poses were tuned from headless renders — the exact feel of
+sway/bob/recoil and the pistol's two-forearms look need a human eye; prone/crouch viewmodel not
+specially tuned (camera just drops); grenade throw only kicks the gun (no throwing-hand animation);
+the muzzle-flash sprite is a simple additive glow.
+
+## Batch 67 (2026-09-21): DONE — viewmodel stability, real grenade + throw animation, sprint-fire straightening
+
+**Gun "waving/bending" while turning the camera — fixed.** Cause: a look-sway I added in batch 66
+(gun lags the camera, then springs back). It scaled with per-frame yaw, so it varied with frame rate,
+and the IK arms visibly flexed to follow it. Removed entirely (and the idle breathing too):
+standing still = perfectly still; only walking, firing, reloading, switching etc. move the gun.
+Measured in headless Chrome during a continuous fast turn: gun anchor range 0.000 on all axes.
+Also cut the per-frame cost: the rig no longer re-evaluates the idle animation each frame (the six IK
+bones are reset from cached rest rotations), and `updateFirstPersonRig` skips the IK entirely when the
+gun pose is identical to last frame (arms are solved relative to the camera, so turning never
+invalidates them). Turning while standing: ~0.14 ms/frame (was ~1.5 ms avg, 7 ms spikes).
+
+**Grenade.** No 3D grenade exists in the asset packs, so `public/js/grenadeModel.js` builds a
+fragmentation ("pineapple") grenade procedurally: lathe body with a canvas grid texture + bump
+(raised olive cells, dark grooves, grime), fuse neck/head/cap, a curved safety lever, pin + brass
+ring (`userData.pin`). World grenades (`grenades.js`) use it (11 cm body radius, tumbling in
+proportion to distance travelled); the red PointLight and emissive tint that made it a "red glowing
+block" are gone. To swap in a downloaded model later: replace `buildGrenadeModel()`.
+
+**Throw animation (first person).** `viewmodel.js` grenade state machine: lower (gun dips) → prep
+(grenade rises into the right hand while the left hand comes up and pulls the pin; ring disappears)
+→ hold (as long as G is held; trajectory preview unchanged) → wind (arm cocks back) → toss (arm snaps
+forward; at the release point the grenade leaves the hand) → follow-through → gun raises again. The
+grenade rides the same IK rig as a prop (`attachFirstPersonProp`, pseudo weapon id 4, left hand target
+via `updateFirstPersonRig(..., leftTarget)`). The throw MESSAGE to the server and the throw sound are
+now sent at the release point (a fraction of a second after G is released) with the aim captured at
+release, so the world grenade appears when the arm lets go instead of before the wind-up. Firing,
+reloading and starting a reload are blocked while the grenade is out; starting a grenade drops an
+in-progress reload (same as switching weapons). A tap of G still completes the whole sequence
+(~0.6 s to leave the hand); server logic/cooldown untouched. Dying or losing pointer lock cancels it.
+
+**Sprint + fire.** While the trigger is held (and for 0.3 s after each shot) the sideways sprint carry
+blends back to the straight aiming pose (fast, 18/s) and eases back into the carry after (8/s); walk-bob
+amplitude also drops to the walking level while firing. `setTriggerHeld` is driven from the fire
+handlers in weapons.js (`stopFiring` clears it).
+
+Verified in headless Chrome: rc8 (hold G, release: server sees the throw, count 3→2, world grenade
+renders, no errors), rc9 (sprint / sprint+fire / after — frames confirm the gun squares up while firing
+and returns), rc7 (turn stability + timing), plus rc and rc3 regressions (29/29, 9/9). Not verified by
+a human eye: the exact feel/timing of the throw and the pin-pull hand motion.
+
+## Batch 68 (2026-09-21): DONE — real M67 grenade + 5 sounds, bounce sounds, dropped-player immunity guard, chat hint
+
+**Assets (user supplied 5 files, dropped in the project root; originals still in ~/Downloads):**
+`m67_hand_grenade.glb` (Sketchfab "M67 Hand Grenade" by Loukey, **CC BY 4.0 — attribution required**, shown
+in the dashboard Settings tab "Credits") and 4 clips. The GLB was downscaled offline (3× 2048px PNG → 1024px,
+8.8 MB → 2.7 MB, ~48 MB → ~12 MB of GPU texture memory) into `public/models/grenade/m67_hand_grenade.glb`.
+It is ONE mesh of 2,904 tris whose node transforms already stand it upright (Sketchfab ×6.4 chain); the mesh
+is really 5 islands: the body (lever is welded into it — can't be separated) and 4 tiny ones = pin ring, shaft,
+ends. `grenadeModel.js` splits those 4 into a `GrenadePin` group at load (union-find over welded vertices;
+skips the split if the island count isn't 5), normalises to body radius 1 at the origin, and exposes
+`createGrenade()` (M67 once loaded, the old procedural grenade as a stand-in before that / on failure),
+`setPinPull(g, 0..1)` (slides the pin out along raw +Y, hides at 1), `setPinVisible`, `onGrenadeModelReady`.
+NB `Object3D.clone` JSON-copies userData, so parts are found by NAME (`GrenadePin`), never via userData.
+Sounds cut with ffmpeg into `public/sounds/`: `grenade-pin.mp3` (0.48 s, the bright metallic ring) and
+`grenade-throw.mp3` (0.145 s, the low tonal "effort" thump, boosted ×7 — very quiet in the source) are the two
+halves of the user's "pin+throw" clip, split at its silent gap (475–665 ms); `grenade-ground.mp3` (0.5 s),
+`grenade-wall.mp3` (0.26 s), `grenade-blast.mp3` (1.96 s; replaces `grenade-explosion.mp3`, which is now unused).
+Blast is ~1.2× louder than the old clip so its play gain went 3.5 → 2.9 (same perceived level).
+
+**Where each plays (3D preserved):** tick (unchanged), blast, and the new bounces are all POSITIONAL
+(`playPositionalOneShot`: HRTF wet/dry blend, distance falloff, wall-occlusion muffling). Pin pull and throw
+are flat/local (your own hands, like your own gunfire) — other players do NOT hear a thrower's pin/throw
+(they hear the tick from when the grenade appears, as before). Ear-ring on `hit` weapon 'Grenade' unchanged.
+**Server:** `grenadeBounce {id,pos,surface:'ground'|'wall',speed}` broadcast to the room on real impacts
+(≥2.5 units/s, ≤1 per grenade per 150 ms). Implemented as read-only bookkeeping (`noteGrenadeImpact`) inside
+the existing collision code — verified by diff vs HEAD that the only pre-existing physics line touched is the
+ground-bounce line where the note call was inserted (velocity math identical). Client plays
+`sfx.grenadeBounce(pos, surface, speed)` (louder for harder hits).
+
+**First person:** the M67 is the hand prop (`viewmodel.js`, scale 0.05, offset (0,.085,-.005) so the body sits
+on top of the fist); pin slides out at prep 50–67% and the pin sound fires exactly once at that moment
+(`onGrenadePin` hook registered by weapons.js; also fires if a tap skips ahead). World grenades: M67 at 11 cm
+body radius, pin hidden (already pulled), rolls as it travels; the old red PointLight/emissive are gone.
+
+**Dropped-player immunity (asked mid-batch, confirmed + hardened):** every damage path already skipped players
+with `disconnected` (handleAttack, explodeGrenade, pickups); `applyDamage` and `killByEnvironment` now ALSO
+refuse a `disconnected` target, so no current/future source can hurt a held slot. Also true while the "Rejoin
+your match?" prompt is up (the slot stays held until Yes). Live test `dc_immunity.mjs` 10/10: AKM/shotgun/Glock/
+knife from 4 sides + a grenade dropped on the victim do nothing; after reconnecting the same attacks land.
+Side note (not changed): after Yes-reconnect there is no spawn protection while the scene loads.
+
+**Chat discoverability (user couldn't find it):** chat opens with Enter in a match (unchanged) but nothing said
+so — added an "Enter chat" hint at the lower left of the HUD (hidden while the box is open) and an Enter row in
+the Controls list.
+
+**Tests (real headless Chrome / live server), all passing:** `gren_physics.mjs` (12 rooms × 6 rounds, both maps,
+~10.5k tick samples over 3 runs: no grenade position inside any wall/door/slab, no path segment between ticks
+crosses one, never below ground/stairs, thrown-at-mansion-wall never gets past the face and announces a WALL
+bounce, grenades dropped on 4 stairs and the rooftop rest on top, every grenade reaches BOTH clients every
+tick = globally visible); `rc10.mjs` 15/15 ×3 (grenade on the player: tick/bounce/blast are 3D, ring is flat
+and plays after the blast; far grenade: blast heard in 3D, NO ring, NO damage; own pin + throw flat; thrown
+grenade ticks in 3D; other player receives it); rc/rc3/rc8 regressions. Test bug worth remembering: a player
+respawns at a NEW position after dying — measure "outside the radius" from the current state, not the join pos.
+Not verified by a human eye: how the M67 grip/orientation feels in hand and the pin-pull hand motion.
+
+## Batch 69 (2026-09-21): DONE — weapon fire/reload animations, muzzle flash, casings; interactive dashboard character
+
+**Weapon animation (first person; `gunanim.js` + `weaponfx.js` + `viewmodel.js`).** The three FBX guns are each one
+mesh but consist of separate triangle islands; `splitGunParts` (characters.js, in `normalizeGun`) splits them by
+where each island sits in the gun's bounding box (fractions, unit-independent) while PRESERVING per-triangle
+materials (the FBX is non-indexed with per-material groups): Glock **slide** (incl. sights/serrations; the barrel
+stays), shotgun **pump** (biggest island), AKM **magazine** (island reaching the bottom). No separate AKM
+charging handle or Glock magazine exists, so `gunanim.js` adds small stand-in props (`FxHandle`, `FxMag`,
+`FxShell`). Part API: `gunPart / setPartOffset / setPartVisible / cloneGunPartWorld` (offsets in GUN space, metres:
++X barrel, +Y up, +Z right). `updateFirstPersonRig(..., opts)` gained `leftGrip` (gun-space support-hand grip, so the
+hand follows the pump / goes to the mag / belt) and a generic change-signature that skips the IK when nothing moved.
+- **Fire:** AKM handle/bolt reciprocates every shot + brass ejects right; shotgun big fireball, 3 smoke puffs,
+  heavy kick, pump back 0.20–0.33 s / forward 0.48–0.665 s (matches the two clacks of `shotgunpump.mp3`) with the
+  left hand riding the fore-end and the red shell ejecting at the back stroke; Glock slide snaps back/forward, brass
+  ejects, and on the LAST round the slide stays locked back until the reload releases it (`setViewmodelAmmo`).
+  Muzzle flash = round glow + 12-point star + a real PointLight lighting gun/hands (sizes per gun).
+- **Reload:** timelines timed to the transients measured in the recordings: AKM mag out 0.26 s (real mag part falls
+  as a physical prop), new mag rides the left hand in 1.25–1.735 s, seats at 1.735/2.07 s, handle racked 3.16/3.33 s;
+  Glock mag out 0.24 s, in 1.1–1.28 s, slide rack 1.9 s / release 2.19 s; shotgun 4 shells at 1.0/1.45/1.9/2.35 s
+  (hand ping-pongs belt↔port with a shell prop), closing pump 2.82/3.05 s. The gun is lifted and rolled toward the
+  eyes for the reload (otherwise the well is below the screen edge). Weapon switch / grenade cancels cleanly.
+- **`weaponfx.js`:** pooled world-space casings (rifle/pistol/shell) with gravity, floor bounce and a synthesized
+  positional clink on first contact (`sfx.casingDrop`; no recorded clip exists), smoke sprites, dropped-mag props.
+- Verified with a deterministic frame harness (real viewmodel, fixed 60 fps, contact sheets of every cycle) and in
+  the real game (`rc14`: burst, pump, empty Glock, all 3 reloads refill correctly, switch-mid-reload keeps ammo).
+- **Not done / limits:** the AKM charging handle is a prop (handle is on the right side and is only lightly visible
+  from the first-person angle); the reload hand grabs with a fixed palm orientation (no per-finger grip); the pistol's
+  spent mag and the two-forearm look are approximate; other players' guns do NOT show muzzle flash/casings/slide
+  yet (only the local first-person view was animated); casings only bounce on the floor plane (not walls); Glock
+  new-mag prop is only briefly visible. Feel/timing need a human look.
+
+**Dashboard character preview is now interactive.** No more auto-spin: drag to rotate (inertia on release), vertical
+drag tilts the camera, pinch or scroll to zoom, double-click/tap resets, ⟲ ⟳ turn buttons; pose chips (Idle / Walk /
+Run / Crouch, cross-faded), weapon chips (AKM / Shotgun / Pistol / Knife) and a 📷 button that saves a transparent PNG.
+One code path for mouse/touch/pen (pointer events, `touch-action:none`). The character starts facing the camera.
+Same controls on the Play and Character tabs (`preview.js`, `.pvBar` CSS). Test: `rc13` 6/6.

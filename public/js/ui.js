@@ -1,8 +1,11 @@
 import { MAPS, MAP_BOUNDS, DEFAULT_MAP } from '/shared/gameData.js';
 import { state } from './state.js';
-import { sendMsg } from './net.js';
+import { sendMsg, leaveConnection, clearSession } from './net.js';
 import { cancelGrenadeAim } from './weapons.js';
-import { setMasterVolume } from './audio.js';
+import { setMasterVolume, setMusicVolume, setSfxVolume } from './audio.js';
+import { setFov } from './world.js';
+import { mountPreviewInto, resizePreview, setPreviewAppearance, startPreviewLoop, stopPreviewLoop } from './preview.js';
+import { CHARACTERS, SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, SLOTS, sanitizeAppearance } from '/shared/appearance.js';
 
 // ---------- DOM ----------
 const authScreen = document.getElementById('authScreen');
@@ -68,13 +71,12 @@ function getAuth() {
 function setAuth(username) { localStorage.setItem('ruins_auth', JSON.stringify({ username })); }
 function clearAuth() { localStorage.removeItem('ruins_auth'); }
 
-// The signed-in account's chosen customization color — fetched once on showing the dashboard,
-// re-sent on every `hello` (see sendHello() below, which reads myPrimaryColor directly since
-// it's declared in this same module) so the server can attach it to this player's room entry
-// and broadcast it to everyone else's `characters.js` remote-figure rendering.
+// The signed-in account's saved character appearance (body, skin, hair, clothes) — fetched once
+// on showing the dashboard and re-sent on every `hello` (see sendHello() below) so the server can
+// attach it to this player's room entry and hand it to everyone else's remote-figure rendering.
 let myUsername = null;
-let myPrimaryColor = null;
-let mySecondaryColor = null;
+let myAppearance = sanitizeAppearance(null);   // what's saved
+let draftAppearance = myAppearance;            // what the closet is currently showing (unsaved)
 
 function showDashboard(username) {
   authScreen.hidden = true;
@@ -83,6 +85,7 @@ function showDashboard(username) {
   dashAccountLabel.textContent = `Signed in as ${username}`;
   if (!nameInput.value) nameInput.value = username;
   loadProfile();
+  syncPreviewForPane(activePane);
 }
 function showAuth() {
   dashboardScreen.hidden = true;
@@ -91,6 +94,7 @@ function showAuth() {
   authPassInput.value = '';
   authError.textContent = '';
   authUserInput.focus();
+  stopPreviewLoop();
 }
 
 async function submitAuth(kind) {
@@ -130,42 +134,79 @@ authLoginBtn.addEventListener('click', () => submitAuth('login'));
 authRegisterBtn.addEventListener('click', () => submitAuth('register'));
 authPassInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth('login'); });
 authUserInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') authPassInput.focus(); });
-dashLogoutBtn.addEventListener('click', () => { clearAuth(); showAuth(); });
-
-const savedAuth = getAuth();
-if (savedAuth && savedAuth.username) showDashboard(savedAuth.username);
-else showAuth();
+dashLogoutBtn.addEventListener('click', () => { clearAuth(); clearSession(); showAuth(); });
 
 // ---------- Dashboard: sidebar nav + panes, Play modal open/close ----------
+const playPreviewSlot = document.getElementById('playPreviewSlot');
+const characterPreviewSlot = document.getElementById('characterPreviewSlot');
+const playPreviewName = document.getElementById('playPreviewName');
+
+// The 3D preview widget (preview.js) is one shared canvas moved between the Play and Character
+// panes' slots — only mounted+animating while one of those two panes is actually visible, so
+// switching to Profile/Settings (or opening the Play modal, which covers the dashboard entirely)
+// stops the render loop instead of spinning a hidden canvas for no reason.
+let activePane = 'play';
+function syncPreviewForPane(pane) {
+  if (pane === 'play') { mountPreviewInto(playPreviewSlot); startPreviewLoop(); resizePreview(); }
+  else if (pane === 'character') { mountPreviewInto(characterPreviewSlot); startPreviewLoop(); resizePreview(); }
+  else stopPreviewLoop();
+}
+
 function setDashPane(pane) {
+  activePane = pane;
   dashNavBtns.forEach((b) => b.classList.toggle('active', b.dataset.pane === pane));
   dashPanes.forEach((p) => { p.hidden = p.dataset.pane !== pane; });
+  syncPreviewForPane(pane);
 }
 dashNavBtns.forEach((btn) => btn.addEventListener('click', () => setDashPane(btn.dataset.pane)));
+window.addEventListener('resize', () => { if (!dashboardScreen.hidden) resizePreview(); });
 
 function openPlayModal() {
   dashboardScreen.hidden = true;
   menuScreen.hidden = false;
+  stopPreviewLoop(); // covered by the modal — no point rendering it while hidden
   sendMsg({ type: 'listRooms' });
 }
 function closePlayModal() {
   menuScreen.hidden = true;
   dashboardScreen.hidden = false;
+  syncPreviewForPane(activePane);
 }
 dashPlayBtn.addEventListener('click', openPlayModal);
 closeMenuBtn.addEventListener('click', closePlayModal);
 
-// ---------- Profile tab: lifetime stats fetched from the account's DB row ----------
+// ---------- Profile tab: lifetime stats + a BGMI-style rank tier (computed client-side from
+// lifetime kills — purely cosmetic, no new server concept needed for it) ----------
 const statKills = document.getElementById('statKills');
 const statDeaths = document.getElementById('statDeaths');
 const statKD = document.getElementById('statKD');
+const statWins = document.getElementById('statWins');
+const statWinRate = document.getElementById('statWinRate');
 const statMatches = document.getElementById('statMatches');
-const primaryColorInput = document.getElementById('primaryColorInput');
-const secondaryColorInput = document.getElementById('secondaryColorInput');
-const charPreviewPrimary = document.getElementById('charPreviewPrimary');
-const charPreviewSecondary = document.getElementById('charPreviewSecondary');
+const profileAvatar = document.getElementById('profileAvatar');
+const profileUsername = document.getElementById('profileUsername');
+const profileMemberSince = document.getElementById('profileMemberSince');
+const profileRankBadge = document.getElementById('profileRankBadge');
+const profileRankLabel = document.getElementById('profileRankLabel');
+const closetEl = document.getElementById('closet');
+const resetCharacterBtn = document.getElementById('resetCharacterBtn');
 const saveCharacterBtn = document.getElementById('saveCharacterBtn');
 const characterSaveMsg = document.getElementById('characterSaveMsg');
+
+const RANK_TIERS = [
+  { min: 0, cls: 'rank-bronze', label: 'Bronze' },
+  { min: 10, cls: 'rank-silver', label: 'Silver' },
+  { min: 30, cls: 'rank-gold', label: 'Gold' },
+  { min: 75, cls: 'rank-platinum', label: 'Platinum' },
+  { min: 150, cls: 'rank-diamond', label: 'Diamond' },
+  { min: 300, cls: 'rank-crown', label: 'Crown' },
+  { min: 600, cls: 'rank-ace', label: 'Ace' },
+];
+function rankTierFor(kills) {
+  let tier = RANK_TIERS[0];
+  for (const t of RANK_TIERS) if (kills >= t.min) tier = t;
+  return tier;
+}
 
 async function loadProfile() {
   if (!myUsername) return;
@@ -176,21 +217,126 @@ async function loadProfile() {
     statKills.textContent = data.kills;
     statDeaths.textContent = data.deaths;
     statKD.textContent = data.deaths > 0 ? (data.kills / data.deaths).toFixed(2) : data.kills.toFixed(2);
+    statWins.textContent = data.wins;
+    statWinRate.textContent = data.matchesPlayed > 0 ? `${Math.round((data.wins / data.matchesPlayed) * 100)}%` : '–';
     statMatches.textContent = data.matchesPlayed;
-    myPrimaryColor = data.primaryColor;
-    mySecondaryColor = data.secondaryColor;
-    primaryColorInput.value = data.primaryColor;
-    secondaryColorInput.value = data.secondaryColor;
-    charPreviewPrimary.style.background = data.primaryColor;
-    charPreviewSecondary.style.background = data.secondaryColor;
+
+    profileUsername.textContent = data.username;
+    profileAvatar.style.background = data.appearance.skin;
+    if (data.memberSince) {
+      const d = new Date(data.memberSince);
+      profileMemberSince.textContent = `Member since ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'long' })}`;
+    }
+    const tier = rankTierFor(data.kills);
+    profileRankBadge.className = `rankBadge ${tier.cls}`;
+    profileRankLabel.textContent = tier.label;
+
+    myAppearance = sanitizeAppearance(data.appearance);
+    setDraft(myAppearance);
+    playPreviewName.textContent = data.username;
   } catch (err) {
     // Profile is a nice-to-have on the dashboard, not a gate on playing — a failed fetch just
     // leaves the stat cards at their placeholder '–' rather than blocking anything.
   }
 }
 
-primaryColorInput.addEventListener('input', () => { charPreviewPrimary.style.background = primaryColorInput.value; });
-secondaryColorInput.addEventListener('input', () => { charPreviewSecondary.style.background = secondaryColorInput.value; });
+// ---------- Closet: every option below is generated from the shared catalog (shared/appearance.js),
+// the same one the renderer and the server validate against, so the three can't disagree. ----------
+const SLOT_LABELS = { hair: 'Hair', beard: 'Facial hair', top: 'Top', bottom: 'Bottom', shoes: 'Shoes', gloves: 'Gloves', head: 'Headwear' };
+const SLOT_COLOR_FIELD = { hair: 'hairColor', top: 'topColor', bottom: 'bottomColor', shoes: 'shoesColor', gloves: 'glovesColor', head: 'headColor' };
+const SLOT_PALETTE = { hair: HAIR_COLORS, top: CLOTH_COLORS, bottom: CLOTH_COLORS, shoes: CLOTH_COLORS, gloves: CLOTH_COLORS, head: CLOTH_COLORS };
+
+function hexToRgb(h) { return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); }
+function rgbToHex(c) { return '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join(''); }
+// Continuous skin spectrum: 0..1 walks the anchor tones (white -> black), blending between neighbours.
+function skinAt(t) {
+  const x = Math.min(0.9999, Math.max(0, t)) * (SKIN_TONES.length - 1), i = Math.floor(x), f = x - i;
+  const a = hexToRgb(SKIN_TONES[i]), b = hexToRgb(SKIN_TONES[i + 1]);
+  return rgbToHex(a.map((v, k) => v + (b[k] - v) * f));
+}
+function skinToT(hex) {
+  let best = 0, bestD = 1e9;
+  for (let k = 0; k <= 200; k++) {
+    const c = hexToRgb(skinAt(k / 200)), h = hexToRgb(hex);
+    const d = c.reduce((s2, v, j) => s2 + (v - h[j]) ** 2, 0);
+    if (d < bestD) { bestD = d; best = k / 200; }
+  }
+  return best;
+}
+
+function setDraft(app) {
+  draftAppearance = sanitizeAppearance(app);
+  renderCloset();
+  setPreviewAppearance(draftAppearance);
+}
+function patchDraft(patch) { setDraft({ ...draftAppearance, ...patch }); }
+
+function chipRow(options, current, onPick) {
+  const row = document.createElement('div');
+  row.className = 'chipRow';
+  for (const o of options) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip' + (o.id === current ? ' active' : ''); b.textContent = o.label;
+    b.addEventListener('click', () => onPick(o.id));
+    row.appendChild(b);
+  }
+  return row;
+}
+function swatchRow(palette, current, onPick) {
+  const row = document.createElement('div');
+  row.className = 'swatchRow';
+  for (const c of palette) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'swatch' + (c.toLowerCase() === current.toLowerCase() ? ' active' : ''); b.style.background = c; b.title = c;
+    b.addEventListener('click', () => onPick(c));
+    row.appendChild(b);
+  }
+  const custom = document.createElement('input');
+  custom.type = 'color'; custom.value = current; custom.title = 'Custom color';
+  custom.addEventListener('input', () => onPick(custom.value));
+  row.appendChild(custom);
+  return row;
+}
+function section(title) {
+  const el = document.createElement('div');
+  el.className = 'closetSection';
+  const h = document.createElement('h3'); h.textContent = title; el.appendChild(h);
+  return el;
+}
+
+function renderCloset() {
+  const a = draftAppearance;
+  closetEl.innerHTML = '';
+
+  const body = section('Body');
+  body.appendChild(chipRow(CHARACTERS, a.character, (id) => patchDraft({ character: id })));
+  closetEl.appendChild(body);
+
+  const skin = section('Skin tone');
+  skin.appendChild(swatchRow(SKIN_TONES, a.skin, (c) => patchDraft({ skin: c })));
+  const slider = document.createElement('input');
+  slider.type = 'range'; slider.min = 0; slider.max = 1000; slider.value = Math.round(skinToT(a.skin) * 1000);
+  slider.className = 'skinSlider';
+  slider.style.setProperty('--skin-grad', `linear-gradient(90deg, ${SKIN_TONES.join(', ')})`);
+  slider.addEventListener('input', () => {
+    // drag without rebuilding the whole closet (that would drop the slider mid-drag)
+    draftAppearance = sanitizeAppearance({ ...draftAppearance, skin: skinAt(slider.value / 1000) });
+    setPreviewAppearance(draftAppearance);
+  });
+  slider.addEventListener('change', () => renderCloset());
+  skin.appendChild(slider);
+  closetEl.appendChild(skin);
+
+  for (const slot of ['hair', 'beard', 'top', 'bottom', 'shoes', 'gloves', 'head']) {
+    const sec = section(SLOT_LABELS[slot]);
+    sec.appendChild(chipRow(SLOTS[slot], a[slot], (id) => patchDraft({ [slot]: id })));
+    const cf = SLOT_COLOR_FIELD[slot];
+    if (cf && a[slot] !== 'none') sec.appendChild(swatchRow(SLOT_PALETTE[slot], a[cf], (c) => patchDraft({ [cf]: c })));
+    closetEl.appendChild(sec);
+  }
+}
+
+resetCharacterBtn.addEventListener('click', () => setDraft(myAppearance));
 
 saveCharacterBtn.addEventListener('click', async () => {
   if (!myUsername) return;
@@ -200,19 +346,15 @@ saveCharacterBtn.addEventListener('click', async () => {
     const res = await fetch('/api/customization', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: myUsername,
-        primaryColor: primaryColorInput.value,
-        secondaryColor: secondaryColorInput.value,
-      }),
+      body: JSON.stringify({ username: myUsername, appearance: draftAppearance }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
       characterSaveMsg.textContent = data.error || 'Save failed.';
       return;
     }
-    myPrimaryColor = primaryColorInput.value;
-    mySecondaryColor = secondaryColorInput.value;
+    myAppearance = sanitizeAppearance(data.appearance);
+    profileAvatar.style.background = myAppearance.skin; // keep the Profile tab's avatar in sync too
     characterSaveMsg.textContent = 'Saved.';
     setTimeout(() => { characterSaveMsg.textContent = ''; }, 2500);
   } catch (err) {
@@ -221,25 +363,50 @@ saveCharacterBtn.addEventListener('click', async () => {
     saveCharacterBtn.disabled = false;
   }
 });
+renderCloset();
 
-// ---------- Settings tab: master volume + mouse sensitivity, saved to localStorage ----------
+// ---------- Settings tab: BGMI-style, grouped Sound/Sensitivity/Gameplay sections, every
+// control wired to a real mechanism (not a decorative stub) — see audio.js's music/sfx gain
+// split, world.js's setFov, and movement.js's toggle-sprint mode. All saved to localStorage,
+// per-device rather than per-account (deliberately separate from the DB-backed profile). ----------
 const masterVolumeInput = document.getElementById('masterVolumeInput');
 const masterVolumeVal = document.getElementById('masterVolumeVal');
+const musicVolumeInput = document.getElementById('musicVolumeInput');
+const musicVolumeVal = document.getElementById('musicVolumeVal');
+const sfxVolumeInput = document.getElementById('sfxVolumeInput');
+const sfxVolumeVal = document.getElementById('sfxVolumeVal');
 const mouseSensInput = document.getElementById('mouseSensInput');
 const mouseSensVal = document.getElementById('mouseSensVal');
+const fovInput = document.getElementById('fovInput');
+const fovVal = document.getElementById('fovVal');
+const sprintModeToggle = document.getElementById('sprintModeToggle');
 
 function loadSettings() {
-  const savedVol = localStorage.getItem('ruins_masterVolume');
-  const vol = savedVol !== null ? Number(savedVol) : 80;
-  masterVolumeInput.value = vol;
-  masterVolumeVal.textContent = `${vol}%`;
-  setMasterVolume(vol / 100);
+  const readPct = (key, fallback) => {
+    const saved = localStorage.getItem(key);
+    return saved !== null ? Number(saved) : fallback;
+  };
 
-  const savedSens = localStorage.getItem('ruins_mouseSensitivity');
-  const sens = savedSens !== null ? Number(savedSens) : 100;
-  mouseSensInput.value = sens;
-  mouseSensVal.textContent = `${sens}%`;
-  state.mouseSensitivity = sens / 100;
+  const vol = readPct('ruins_masterVolume', 80);
+  masterVolumeInput.value = vol; masterVolumeVal.textContent = `${vol}%`; setMasterVolume(vol / 100);
+
+  const musicVol = readPct('ruins_musicVolume', 70);
+  musicVolumeInput.value = musicVol; musicVolumeVal.textContent = `${musicVol}%`; setMusicVolume(musicVol / 100);
+
+  const sfxVol = readPct('ruins_sfxVolume', 100);
+  sfxVolumeInput.value = sfxVol; sfxVolumeVal.textContent = `${sfxVol}%`; setSfxVolume(sfxVol / 100);
+
+  const sens = readPct('ruins_mouseSensitivity', 100);
+  mouseSensInput.value = sens; mouseSensVal.textContent = `${sens}%`; state.mouseSensitivity = sens / 100;
+
+  const fov = readPct('ruins_fov', 75);
+  fovInput.value = fov; fovVal.textContent = `${fov}°`; setFov(fov);
+
+  const toggleSprint = localStorage.getItem('ruins_toggleSprint') === '1';
+  state.toggleSprint = toggleSprint;
+  sprintModeToggle.textContent = toggleSprint ? 'TOGGLE' : 'HOLD';
+  sprintModeToggle.classList.toggle('on', toggleSprint);
+  sprintModeToggle.classList.toggle('off', !toggleSprint);
 }
 loadSettings();
 
@@ -249,11 +416,38 @@ masterVolumeInput.addEventListener('input', () => {
   setMasterVolume(vol / 100);
   localStorage.setItem('ruins_masterVolume', String(vol));
 });
+musicVolumeInput.addEventListener('input', () => {
+  const vol = Number(musicVolumeInput.value);
+  musicVolumeVal.textContent = `${vol}%`;
+  setMusicVolume(vol / 100);
+  localStorage.setItem('ruins_musicVolume', String(vol));
+});
+sfxVolumeInput.addEventListener('input', () => {
+  const vol = Number(sfxVolumeInput.value);
+  sfxVolumeVal.textContent = `${vol}%`;
+  setSfxVolume(vol / 100);
+  localStorage.setItem('ruins_sfxVolume', String(vol));
+});
 mouseSensInput.addEventListener('input', () => {
   const sens = Number(mouseSensInput.value);
   mouseSensVal.textContent = `${sens}%`;
   state.mouseSensitivity = sens / 100;
   localStorage.setItem('ruins_mouseSensitivity', String(sens));
+});
+fovInput.addEventListener('input', () => {
+  const fov = Number(fovInput.value);
+  fovVal.textContent = `${fov}°`;
+  setFov(fov);
+  localStorage.setItem('ruins_fov', String(fov));
+});
+sprintModeToggle.addEventListener('click', () => {
+  const toggleSprint = !state.toggleSprint;
+  state.toggleSprint = toggleSprint;
+  state.sprintToggledOn = false; // clean slate switching modes mid-session
+  sprintModeToggle.textContent = toggleSprint ? 'TOGGLE' : 'HOLD';
+  sprintModeToggle.classList.toggle('on', toggleSprint);
+  sprintModeToggle.classList.toggle('off', !toggleSprint);
+  localStorage.setItem('ruins_toggleSprint', toggleSprint ? '1' : '0');
 });
 
 // Every button in the UI gets 2 small blood-stain decals, picked randomly per button so no two
@@ -270,30 +464,34 @@ mouseSensInput.addEventListener('input', () => {
 // miss out, but nothing in this UI works that way.
 function decorateButtonsWithBlood() {
   const images = ['/images/blood_splat1.png', '/images/blood_splat2.png'];
-  // Fixed corners now, not a random pick of any 2-of-4 — top-right and bottom-left specifically
-  // (reported as "messy": a random corner + a negative offset let the decal's own square image
-  // bounds bleed OUTSIDE the button's edge, reading as a floating rectangle against the page
-  // background rather than a stain on the button). `overflow: hidden` on the button (set below)
-  // now guarantees the decal is clipped to the button's own rounded rect no matter its rotation,
-  // so it only ever covers part of that corner, never spills past it.
-  const corners = [{ top: '-4px', right: '-4px' }, { bottom: '-4px', left: '-4px' }];
-  // .modalClose excluded: it's a tiny icon-only "×" button (~30px) — decals sized for a normal
-  // label button (16-30px each) would swallow the glyph entirely rather than just accenting a
-  // corner of it.
-  document.querySelectorAll('button:not(.modalClose)').forEach((btn) => {
+  // A diagonal corner-flag look, not a small floating splat: each square decal image is
+  // clip-path'd down to a right triangle whose 90° corner sits exactly on the button's own
+  // corner (legs flush with the button's top/left or bottom/right edges, hypotenuse cutting
+  // diagonally across the corner into the button) — one triangle pinned to top-left, the other
+  // to bottom-right, per the user's explicit ask ("square diagonally cut... one corner aligned
+  // with top-left, another with bottom-right"). No rotation here (unlike a free-floating splat)
+  // since any rotation would pull the triangle's legs away from the button's actual edges and
+  // break the flush alignment that's the whole point of this shape.
+  const placements = [
+    { style: { top: '0', left: '0' }, clip: 'polygon(0 0, 100% 0, 0 100%)' },
+    { style: { bottom: '0', right: '0' }, clip: 'polygon(100% 100%, 100% 0, 0 100%)' },
+  ];
+  // .modalClose excluded: it's a tiny icon-only "×" button (~30px) — a decal sized for a normal
+  // label button would swallow the glyph entirely rather than just accenting a corner of it.
+  document.querySelectorAll('button:not(.modalClose):not(.chip):not(.swatch)').forEach((btn) => {
     if (getComputedStyle(btn).position === 'static') btn.style.position = 'relative';
     btn.style.overflow = 'hidden';
-    corners.forEach((corner) => {
+    placements.forEach(({ style, clip }) => {
       const decal = document.createElement('img');
       decal.className = 'btnBloodDecal';
       decal.alt = '';
       decal.src = images[Math.floor(Math.random() * images.length)];
-      const size = 16 + Math.random() * 14; // 16-30px — small enough to stay out of the label's way
+      const size = 22 + Math.random() * 14; // 22-36px square, clipped down to a corner triangle
       decal.style.width = `${size}px`;
-      const rot = Math.floor(Math.random() * 360);
-      const flip = Math.random() < 0.5 ? -1 : 1;
-      decal.style.transform = `rotate(${rot}deg) scaleX(${flip})`;
-      Object.assign(decal.style, corner);
+      decal.style.height = `${size}px`;
+      decal.style.objectFit = 'cover';
+      decal.style.clipPath = clip;
+      Object.assign(decal.style, style);
       btn.appendChild(decal);
     });
   });
@@ -326,8 +524,11 @@ export function currentName() {
 // persisted stats) and the chosen Character-tab color (so remote players render it, see
 // characters.js/getMyColor). Both optional server-side: a guest with no linked account still
 // plays fine, just without persisted stats or a custom color.
-function sendHello() {
-  sendMsg({ type: 'hello', name: currentName(), username: myUsername || undefined, color: myPrimaryColor || undefined });
+export function sendHello() {
+  sendMsg({
+    type: 'hello', name: currentName(), username: myUsername || undefined,
+    appearance: myAppearance,
+  });
 }
 
 // The time input now has `step="1"` (index.html) so its native picker shows a seconds field
@@ -359,7 +560,7 @@ createBtn.addEventListener('click', () => {
   sendMsg({ type: 'createRoom', roomName: rn, map: mapSelect.value || DEFAULT_MAP, durationSec, memeMode: memeModeOn });
 });
 
-matchEndQuitBtn.addEventListener('click', () => { location.reload(); });
+matchEndQuitBtn.addEventListener('click', () => leaveMatchAndReload());
 
 nameInput.addEventListener('change', sendHello);
 
@@ -396,7 +597,7 @@ export function pushKillFeed(text) {
 
 export function renderBoardInto(tbody, list) {
   tbody.innerHTML = list
-    .map((p, i) => `<tr><td>${i + 1}</td><td class="name">${escapeHtml(p.name)}${p.id === state.localId ? ' (you)' : ''}</td><td>${p.kills}</td><td>${p.deaths}</td></tr>`)
+    .map((p, i) => `<tr><td>${i + 1}</td><td class="name">${escapeHtml(p.name)}${p.id === state.localId ? ' (you)' : ''}${p.dc ? '<span class="offlineTag">offline</span>' : ''}</td><td>${p.kills}</td><td>${p.deaths}</td></tr>`)
     .join('');
 }
 export function renderLeaderboard(list) {
@@ -419,10 +620,11 @@ export function requestLock() { state.renderer.domElement.requestPointerLock(); 
 lockHint.addEventListener('click', requestLock);
 resumeBtn.addEventListener('click', requestLock);
 pauseControlsBtn.addEventListener('click', () => { pauseMenu.hidden = true; controlsOpenedFromPause = true; controlsModal.hidden = false; });
-quitBtn.addEventListener('click', () => { location.reload(); });
+quitBtn.addEventListener('click', () => leaveMatchAndReload());
 
 document.addEventListener('pointerlockchange', () => {
   state.pointerLocked = document.pointerLockElement === state.renderer?.domElement;
+  if (!state.pointerLocked) closeChat(); // Esc (which drops the lock) also cancels a half-typed message
   if (state.pointerLocked) {
     everLocked = true;
     lockHint.hidden = true;
@@ -488,3 +690,106 @@ export function updateMatchTimerDisplay() {
     matchTimer.textContent = `${mm}:${String(ss).padStart(2, '0')}`;
   }
 }
+
+// ---------- Connection banner (reconnecting / rejoining) ----------
+const connOverlay = document.getElementById('connOverlay');
+const connText = document.getElementById('connText');
+export function showConn(text) { connText.textContent = text; connOverlay.hidden = false; }
+export function hideConn() { connOverlay.hidden = true; }
+
+// Deliberate quit: free the slot on the server right away (no 30s grace period), forget the
+// session so a reload doesn't try to resume, then reload back to the dashboard. The short delay
+// lets the `leave` message flush before the page tears the socket down.
+export function leaveMatchAndReload() {
+  leaveConnection();
+  setTimeout(() => location.reload(), 120);
+}
+
+// ---------- "Rejoin your match?" prompt ----------
+// Shown after a refresh / reopened tab that still has a match session, instead of silently putting
+// the player back into the match. Yes -> onYes(); No -> onNo() (the caller tells the server to drop
+// them from that room and clear their stats there). Nothing else is clickable while it's up.
+const rejoinPrompt = document.getElementById('rejoinPrompt');
+const rejoinYesBtn = document.getElementById('rejoinYesBtn'), rejoinNoBtn = document.getElementById('rejoinNoBtn');
+const rejoinErr = document.getElementById('rejoinErr');
+let rejoinHandlers = null;
+export function showRejoinPrompt(roomLabel, onYes, onNo) {
+  document.getElementById('rejoinRoomName').textContent = roomLabel || 'a match';
+  rejoinErr.hidden = true;
+  rejoinYesBtn.disabled = rejoinNoBtn.disabled = false;
+  rejoinHandlers = { onYes, onNo };
+  rejoinPrompt.hidden = false;
+}
+export function hideRejoinPrompt() { rejoinPrompt.hidden = true; rejoinHandlers = null; }
+export function isRejoinPromptOpen() { return !rejoinPrompt.hidden; }
+// Shown inside the prompt when "Yes" comes back as "that match is gone / your spot expired".
+export function showRejoinError(text) { rejoinErr.textContent = text; rejoinErr.hidden = false; rejoinYesBtn.disabled = true; }
+rejoinYesBtn.addEventListener('click', () => { rejoinYesBtn.disabled = rejoinNoBtn.disabled = true; rejoinHandlers?.onYes(); });
+rejoinNoBtn.addEventListener('click', () => { const h = rejoinHandlers; hideRejoinPrompt(); h?.onNo(); });
+
+// ---------- Chat ----------
+const chatLog = document.getElementById('chatLog');
+const chatInput = document.getElementById('chatInput');
+const chatHint = document.getElementById('chatHint');
+const CHAT_VISIBLE_MS = 12000; // a line fades this long after it arrives, unless the box is open
+export function addChatLine(entry, { instantFade = false } = {}) {
+  const line = document.createElement('div');
+  line.className = 'chatLine' + (entry.system ? ' system' : '');
+  // textContent / text nodes only — chat is other players' input, never interpreted as HTML
+  if (entry.system) line.textContent = entry.text;
+  else {
+    const name = document.createElement('span');
+    name.className = 'cName'; name.textContent = `${entry.name}: `;
+    line.append(name, document.createTextNode(entry.text));
+  }
+  chatLog.appendChild(line);
+  while (chatLog.children.length > 60) chatLog.firstChild.remove();
+  if (instantFade) line.classList.add('faded');
+  else setTimeout(() => line.classList.add('faded'), CHAT_VISIBLE_MS);
+}
+// Replays the server's recent history (on join/reconnect) — old lines start faded so a
+// reconnect doesn't dump a wall of stale text over the screen, but they're all there when the
+// box is opened.
+export function resetChat(history) {
+  chatLog.innerHTML = '';
+  for (const e of history || []) addChatLine(e, { instantFade: Date.now() - (e.t || 0) > CHAT_VISIBLE_MS });
+}
+export function openChat() {
+  state.chatOpen = true;
+  state.keys.clear(); // a held W must not keep walking while you type
+  chatLog.classList.add('open');
+  chatInput.hidden = false;
+  chatHint.hidden = true; // the input itself carries the instructions while it's open
+  chatInput.value = '';
+  chatInput.focus();
+}
+export function closeChat() {
+  if (!state.chatOpen) return;
+  state.chatOpen = false;
+  chatLog.classList.remove('open');
+  chatInput.hidden = true;
+  chatHint.hidden = false;
+  chatInput.blur();
+}
+chatInput.addEventListener('keydown', (e) => {
+  e.stopPropagation(); // keep typing away from the game's document-level hotkeys
+  if (e.key === 'Enter') {
+    const text = chatInput.value.trim();
+    if (text) sendMsg({ type: 'chat', text });
+    closeChat();
+  } else if (e.key === 'Escape') closeChat();
+});
+chatInput.addEventListener('keyup', (e) => e.stopPropagation());
+
+// Kicks off the very first screen (dashboard or auth) — deliberately the LAST statement in this
+// module, not right after getAuth()/showDashboard/showAuth are defined. showDashboard() calls
+// into syncPreviewForPane(), which reads playPreviewSlot/characterPreviewSlot/activePane —
+// const/let bindings declared further down in this same file. Calling it before those
+// declarations had run threw a ReferenceError (the temporal dead zone) that silently killed the
+// rest of this module's top-level execution — every event listener declared after that point
+// (all of the dashboard nav, settings sliders, decorateButtonsWithBlood, etc.) never ran, which
+// is why the preview card was empty AND every button was unresponsive. Putting this trigger
+// last guarantees everything it can transitively reach has already been declared.
+const savedAuth = getAuth();
+if (savedAuth && savedAuth.username) showDashboard(savedAuth.username);
+else showAuth();

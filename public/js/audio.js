@@ -10,13 +10,21 @@ function unlockAudio() { if (audioCtx.state === 'suspended') audioCtx.resume(); 
 document.addEventListener('click', unlockAudio, { once: true });
 document.addEventListener('keydown', unlockAudio, { once: true });
 
-// Single shared gain node every sound in this file routes through on its way to the real audio
-// output — this is what makes the dashboard's Settings-tab master volume slider a real control
-// instead of a per-sound guess: one node, one place to change, every call site below points at
-// `masterGain` instead of `audioCtx.destination` directly.
+// Three-tier gain structure: every sound routes through EITHER musicGain or sfxGain first (so
+// the Settings tab's separate Music/SFX sliders are real independent controls, BGMI-style),
+// and both of those feed into the shared masterGain on their way to the real audio output.
+// `bus` on playBuffer() picks which one a given clip uses — background music is the only thing
+// that ever passes 'music', everything else (gunfire, UI cues, footsteps, positional audio)
+// defaults to 'sfx'.
 const masterGain = audioCtx.createGain();
 masterGain.connect(audioCtx.destination);
+const musicGain = audioCtx.createGain();
+const sfxGain = audioCtx.createGain();
+musicGain.connect(masterGain);
+sfxGain.connect(masterGain);
 export function setMasterVolume(v) { masterGain.gain.value = Math.max(0, Math.min(1, v)); }
+export function setMusicVolume(v) { musicGain.gain.value = Math.max(0, Math.min(1, v)); }
+export function setSfxVolume(v) { sfxGain.gain.value = Math.max(0, Math.min(1, v)); }
 
 // Decoded once each at page load (these are all under 4s, so by the time a player has gotten
 // through auth + the menu + actually joined a room, decoding is long finished) and cached —
@@ -31,7 +39,11 @@ const SOUND_FILES = {
   shotgunPump: '/sounds/shotgunpump.mp3',
   shotgunReload: '/sounds/shotgun-reload.mp3',
   grenadeClock: '/sounds/grenade-clock.mp3',
-  grenadeExplosion: '/sounds/grenade-explosion.mp3',
+  grenadeExplosion: '/sounds/grenade-blast.mp3',
+  grenadePin: '/sounds/grenade-pin.mp3',
+  grenadeThrow: '/sounds/grenade-throw.mp3',
+  grenadeGround: '/sounds/grenade-ground.mp3',
+  grenadeWall: '/sounds/grenade-wall.mp3',
   gameOver: '/sounds/game-over.mp3',
   background: '/sounds/backround.mp3',
   ring: '/sounds/ring.mp3',
@@ -44,6 +56,13 @@ const SOUND_FILES = {
   lavaSound: '/sounds/lava-sound.mp3',
 };
 const soundBuffers = {};
+// Tiny synthesized "brass on the floor" clinks (a few decaying sine partials) — no recorded clip exists for
+// casings, and a real one would only add a file to load for a 60 ms sound.
+function synthClink(freqs, dur, gain) {
+  const sr = audioCtx.sampleRate, n = Math.floor(sr * dur), buf = audioCtx.createBuffer(1, n, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) { const t = i / sr; let v = 0; freqs.forEach((f, k) => { v += Math.sin(2 * Math.PI * f * t) * Math.exp(-t * (38 + k * 22)); }); d[i] = v * gain * (i < 20 ? i / 20 : 1); }
+  return buf;
+}
 for (const [key, url] of Object.entries(SOUND_FILES)) {
   fetch(url)
     .then((res) => res.arrayBuffer())
@@ -51,12 +70,16 @@ for (const [key, url] of Object.entries(SOUND_FILES)) {
     .then((buf) => { soundBuffers[key] = buf; })
     .catch((err) => console.error(`sound load failed: ${key}`, err));
 }
+soundBuffers.casingRifle = synthClink([4200, 6100], 0.09, 0.5);
+soundBuffers.casingPistol = synthClink([5200, 7300], 0.07, 0.45);
+soundBuffers.shellDrop = synthClink([1900, 3100], 0.12, 0.5);
+soundBuffers.magDrop = synthClink([900, 1700, 2600], 0.16, 0.6);
 // Returns the BufferSource so a caller can `.stop()` it early (only the AKM's looped spray
 // clip needs that — every other sound is a one-shot that's left to finish on its own).
 // Silently no-ops if the buffer hasn't decoded yet instead of throwing — there's no sane
 // fallback for a specific missing recording, and this only matters in the first instant after
 // page load, well before a player can actually be in a match to fire/reload/throw anything.
-export function playBuffer(key, { gain = 1, loop = false } = {}) {
+export function playBuffer(key, { gain = 1, loop = false, bus = 'sfx' } = {}) {
   const buffer = soundBuffers[key];
   if (!buffer) return null;
   const src = audioCtx.createBufferSource();
@@ -64,7 +87,7 @@ export function playBuffer(key, { gain = 1, loop = false } = {}) {
   src.loop = loop;
   const g = audioCtx.createGain();
   g.gain.value = gain;
-  src.connect(g); g.connect(masterGain);
+  src.connect(g); g.connect(bus === 'music' ? musicGain : sfxGain);
   src.start();
   return src;
 }
@@ -87,7 +110,7 @@ export function playRingEffect() {
   g.gain.setValueAtTime(1, t0);
   g.gain.setValueAtTime(1, t0 + dur - fadeDur);
   g.gain.linearRampToValueAtTime(0, t0 + dur);
-  src.connect(g); g.connect(masterGain);
+  src.connect(g); g.connect(sfxGain);
   src.start();
 }
 
@@ -228,7 +251,7 @@ function startPositionalSource(key, pos, gain, loop) {
 
   src.connect(wetPanner); wetPanner.connect(wetGain); wetGain.connect(filter);
   src.connect(dryPanner); dryPanner.connect(dryGain); dryGain.connect(filter); // WebAudio sums multiple inputs into one node automatically
-  filter.connect(mixGain); mixGain.connect(masterGain);
+  filter.connect(mixGain); mixGain.connect(sfxGain);
 
   applyOcclusionParams(filter, mixGain, 1, isOccludedBetween(localListenerPos(), pos));
   src.start();
@@ -265,7 +288,7 @@ function tone(freq, dur, type, gain, glideTo) {
   if (glideTo) osc.frequency.exponentialRampToValueAtTime(glideTo, t0 + dur);
   g.gain.setValueAtTime(gain, t0);
   g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-  osc.connect(g); g.connect(masterGain);
+  osc.connect(g); g.connect(sfxGain);
   osc.start(t0); osc.stop(t0 + dur + 0.02);
 }
 // `filterType` defaults to lowpass (a dull "thud"/boom — explosions, damage, the old
@@ -288,7 +311,7 @@ function noiseBurst(dur, gain, filterFreq, filterType) {
   const g = audioCtx.createGain();
   g.gain.setValueAtTime(gain, t0);
   g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-  src.connect(filt); filt.connect(g); g.connect(masterGain);
+  src.connect(filt); filt.connect(g); g.connect(sfxGain);
   src.start(t0);
 }
 // Per-weapon gunshots use the provided recordings. Glock and Shotgun fire semi-auto (one
@@ -321,7 +344,22 @@ export const sfx = {
   empty() { tone(220, 0.045, 'square', 0.1); },
   hitMarker() { tone(1400, 0.04, 'square', 0.09); },
   damage() { noiseBurst(0.18, 0.16, 700); },
-  grenadeThrow() { tone(260, 0.14, 'sine', 0.1, 120); },
+  // Local-only (flat), like your own gunfire: the pin coming out as your left hand pulls it, and the
+  // effort/whoosh as the arm lets go. Both are cut from the same source clip at the silent gap between them.
+  grenadePin() { playBuffer('grenadePin', { gain: 1.4 }); },
+  // Positional and quiet: brass / shell / magazine landing on the floor near you.
+  casingDrop(pos, kind) {
+    const key = kind === 'shell' ? 'shellDrop' : kind === 'pistol' ? 'casingPistol' : kind === 'mag' ? 'magDrop' : 'casingRifle';
+    if (!soundBuffers[key]) return;
+    playPositionalOneShot(key, [pos.x, pos.y, pos.z], kind === 'mag' ? 0.9 : 0.5);
+  },
+  grenadeThrow() { playBuffer('grenadeThrow', { gain: 1.6 }); },
+  // Positional for everyone in the room (the server announces each real impact — see 'grenadeBounce' in
+  // client.js): a clink off the ground or a harder knock off a wall, louder for harder hits.
+  grenadeBounce(pos, surface, speed) {
+    const gain = Math.min(1.8, 0.45 + (speed || 4) / 9);
+    playPositionalOneShot(surface === 'wall' ? 'grenadeWall' : 'grenadeGround', pos, gain);
+  },
   // Positional, same as gunfire/explosions — a grenade only threatens players within its own
   // blast radius, so a full-volume tick heard from across the map wasn't a meaningful warning
   // for anyone it couldn't reach, just noise; the players who actually need to hear it are
@@ -338,7 +376,9 @@ export const sfx = {
   // currently stands (including the thrower, who may have moved off), so unlike your own
   // gunfire this always goes through the panner/occlusion path; the gain here is the sound's
   // OWN base loudness before distance falloff applies on top of it.
-  explosion(pos) { playPositionalOneShot('grenadeExplosion', pos, 3.5); },
+  // The blast clip (grenade-blast.mp3) is ~1.2x louder than the one it replaced, so 2.9 here plays at the same
+  // level the old one did at 3.5.
+  explosion(pos) { playPositionalOneShot('grenadeExplosion', pos, 2.9); },
   pickup() { tone(700, 0.07, 'sine', 0.12, 1100); setTimeout(() => tone(1100, 0.08, 'sine', 0.1, 1500), 70); },
   // Flat/non-positional, like the grenade ear-ring (batch 46) — this is the sound of YOUR OWN
   // view collapsing to the ground, not a world event other players need to localize.
@@ -361,7 +401,7 @@ export function startBackgroundMusic(mapKey) {
   if (backgroundMusicSources.length) return; // already playing — joining mid-match shouldn't restart it
   const layers = MAPS[mapKey]?.music || MAPS[DEFAULT_MAP].music;
   for (const { key, gain } of layers) {
-    const src = playBuffer(key, { loop: true, gain });
+    const src = playBuffer(key, { loop: true, gain, bus: 'music' });
     if (src) backgroundMusicSources.push(src);
   }
 }

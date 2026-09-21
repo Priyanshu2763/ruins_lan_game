@@ -152,7 +152,13 @@ export function updateMovement(dt) {
     return;
   }
 
-  const sprinting = !state.isCrouched && !state.isProne && (state.keys.has('ShiftLeft') || state.keys.has('ShiftRight'));
+  // Hold-to-sprint (default) or tap-to-toggle (Settings tab, BGMI-style) — the actual Shift
+  // keypress that flips state.sprintToggledOn lives in client.js's keydown handler, this just
+  // reads whichever mode is active. Toggled-on sprint auto-cancels the instant movement stops
+  // (below, once isMoving is known) so pressing a move key again doesn't unexpectedly take off
+  // running from a stale toggle.
+  const shiftActive = state.toggleSprint ? state.sprintToggledOn : (state.keys.has('ShiftLeft') || state.keys.has('ShiftRight'));
+  const sprinting = !state.isCrouched && !state.isProne && shiftActive;
   state.isSprinting = sprinting;
   setCrosshairSpread(sprinting ? '13px' : '7px');
   const speed = state.isProne ? PRONE_SPEED : state.isCrouched ? 3.0 : sprinting ? 8.5 : 5.5;
@@ -162,6 +168,7 @@ export function updateMovement(dt) {
   if (state.keys.has('KeyA')) mx -= 1;
   if (state.keys.has('KeyD')) mx += 1;
   state.isMoving = mx !== 0 || mz !== 0;
+  if (!state.isMoving && state.toggleSprint) state.sprintToggledOn = false;
   if (mx !== 0 || mz !== 0) {
     const len = Math.hypot(mx, mz);
     mx /= len; mz /= len;

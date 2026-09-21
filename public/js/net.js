@@ -8,15 +8,83 @@
 import { state } from './state.js';
 
 let ws = null;
+let handlers = null;
+let attempt = 0;
+let retryTimer = null;
+let lastMsgAt = 0;
+let leaving = false;
 
-export function connectWebSocket(onOpen, onMessage) {
-  ws = new WebSocket(`ws://${location.host}`);
-  ws.addEventListener('open', onOpen);
-  ws.addEventListener('message', (ev) => onMessage(JSON.parse(ev.data)));
+// Connects and KEEPS reconnecting: any drop (server restart, wifi blip, sleeping laptop) schedules
+// another attempt with a growing delay, capped at 5s. `onOpen(wasRetry)` fires on every successful
+// (re)connect; `onStatus('connected' | 'reconnecting', attempt)` drives the on-screen banner. What
+// to DO after a reconnect (rejoin the match) is the bootstrap's business, not this file's.
+export function connectWebSocket({ onOpen, onMessage, onStatus }) {
+  handlers = { onOpen, onMessage, onStatus: onStatus || (() => {}) };
+  openSocket();
+  setInterval(watchdog, 2000);
+}
+
+function openSocket() {
+  const sock = new WebSocket(`ws://${location.host}`);
+  ws = sock;
+  // Every listener ignores a socket that's no longer THE current one, so a late event from an
+  // abandoned connection can never re-trigger a reconnect or double-deliver a message.
+  sock.addEventListener('open', () => {
+    if (sock !== ws) return;
+    const wasRetry = attempt > 0;
+    attempt = 0; lastMsgAt = Date.now();
+    handlers.onStatus('connected');
+    handlers.onOpen(wasRetry);
+  });
+  sock.addEventListener('message', (ev) => {
+    if (sock !== ws) return;
+    lastMsgAt = Date.now();
+    handlers.onMessage(JSON.parse(ev.data));
+  });
+  sock.addEventListener('close', () => { if (sock === ws && !leaving) scheduleReconnect(); });
+}
+
+function scheduleReconnect() {
+  attempt++;
+  handlers.onStatus('reconnecting', attempt);
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(openSocket, Math.min(5000, 500 + attempt * 600));
+}
+
+// The server ticks state at 20Hz, so in a live match several seconds of total silence means the
+// connection is dead even if the browser hasn't noticed (a half-open socket can sit "OPEN" for
+// minutes). Don't wait for its close event — abandon it and reconnect now.
+function watchdog() {
+  if (!ws || leaving || ws.readyState !== WebSocket.OPEN || state.localId == null || state.matchOver) return;
+  if (Date.now() - lastMsgAt < 6000) return;
+  const dead = ws;
+  ws = null;
+  try { dead.close(); } catch { /* already gone */ }
+  scheduleReconnect();
 }
 
 export function sendMsg(obj) {
-  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// Deliberate quit: tell the server to free the slot NOW (no 30s grace) and stop auto-reconnecting.
+export function leaveConnection() {
+  leaving = true;
+  sendMsg({ type: 'leave' });
+  clearSession();
+}
+
+// ---------- Session (which match am I in, and what was I carrying) ----------
+// sessionStorage, not localStorage: it survives a refresh of THIS tab (the case we want to
+// resume from) but not a fresh tab or a browser restart, where silently teleporting someone
+// back into an old match would be surprising.
+const SESSION_KEY = 'wreckveil_session', LOADOUT_KEY = 'wreckveil_loadout';
+export function saveSession(obj) { try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(obj)); } catch { /* storage blocked */ } }
+export function loadSession() { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; } }
+export function saveLoadout(obj) { try { sessionStorage.setItem(LOADOUT_KEY, JSON.stringify(obj)); } catch { /* storage blocked */ } }
+export function loadLoadout() { try { return JSON.parse(sessionStorage.getItem(LOADOUT_KEY) || 'null'); } catch { return null; } }
+export function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); sessionStorage.removeItem(LOADOUT_KEY); } catch { /* storage blocked */ }
 }
 
 let netTimer = 0;

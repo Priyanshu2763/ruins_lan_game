@@ -65,20 +65,93 @@
   .dashNavBtn.active { background: #2a2620; color: #e8c65a; border-left-color: #b3924a; }
   .dashMain { flex: 1; overflow-y: auto; padding: 48px 56px; display: flex; justify-content: center; }
   .dashPaneInner { width: 100%; max-width: 640px; }
+  .dashPaneInner.wide { max-width: 920px; }
   .dashPane h2 { font-size: 24px; letter-spacing: 1px; color: #e8e2d0; margin: 0 0 6px; }
   .dashPane .sub { margin: 0 0 28px; }
-  .dashPlayHero { background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 10px; padding: 48px 40px; text-align: center; }
-  .dashPlayHero img { width: 120px; margin-bottom: 18px; filter: drop-shadow(0 6px 16px rgba(0,0,0,0.6)); }
+
+  /* Play/Character panes: main content on the left, a framed character showcase card on the
+     right — the operator-card layout BGMI/most live-service shooters use for their lobby. */
+  .dashSplitRow { display: flex; gap: 28px; align-items: flex-start; }
+  .dashSplitMain { flex: 1; min-width: 0; }
+  .previewCardWrap { width: 260px; flex-shrink: 0; }
+  .previewCard { position: relative; width: 260px; height: 340px; border-radius: 12px; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 20%, #2c2718 0%, #14120d 70%, #0c0b08 100%);
+    border: 1px solid #4a4232; box-shadow: 0 12px 34px rgba(0,0,0,0.55), inset 0 0 40px rgba(0,0,0,0.4); }
+  .previewCard .charPreviewCanvas { display: block; width: 100%; height: 100%; }
+  .previewCard .previewGlow { position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 85%, rgba(179,146,74,0.35) 0%, transparent 60%); }
+  /* interactive preview controls (built in preview.js) */
+  .pvBar { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 8px; }
+  .pvRow { display: flex; gap: 4px; flex-wrap: wrap; }
+  .pvTop { justify-content: center; }
+  .pvSide { position: absolute; left: 8px; top: 40px; flex-direction: column; }
+  .pvBottom { justify-content: center; margin-bottom: 32px; }
+  .pvChip { pointer-events: auto; width: auto; padding: 4px 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; line-height: 1.2;
+    background: rgba(20,18,14,0.78); color: #b9ad86; border: 1px solid #3f3826; border-radius: 6px; cursor: pointer; }
+  .pvChip:hover { background: rgba(50,44,30,0.9); color: #e8dfae; }
+  .pvChip.on { background: #b3924a; color: #1a1710; border-color: #d1b06a; }
+  .pvHint { position: absolute; left: 0; right: 0; bottom: 66px; text-align: center; font-size: 9px; color: #6f6650; pointer-events: none; text-shadow: 0 1px 2px #000; }
+  .previewLabelBar { pointer-events: none; }
+  .previewLabelBar { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
+    background: linear-gradient(0deg, rgba(10,9,7,0.92) 0%, rgba(10,9,7,0) 100%);
+    display: flex; align-items: center; justify-content: space-between; }
+  .previewLabelBar .pname { font-size: 13px; font-weight: 700; color: #e8e2d0; letter-spacing: 0.5px; }
+  .previewCardWrap .sub { margin: 10px 0 0; text-align: center; font-size: 11px; }
+
+  .dashPlayHero { background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 10px; padding: 40px 36px; text-align: center; }
+  .dashPlayHero img { width: 96px; margin-bottom: 16px; filter: drop-shadow(0 6px 16px rgba(0,0,0,0.6)); }
   .dashPlayBtn { font-size: 20px; padding: 18px 0; letter-spacing: 3px; }
-  .statGrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+  /* Profile: identity header (avatar tinted with the player's own color + rank tier badge,
+     computed client-side from lifetime kills — Bronze through Conqueror, BGMI-style) above the
+     stat grid. */
+  .profileHeader { display: flex; align-items: center; gap: 18px; background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 10px; padding: 20px 22px; margin-bottom: 22px; }
+  .avatarCircle { width: 64px; height: 64px; border-radius: 50%; flex-shrink: 0; border: 2px solid rgba(255,255,255,0.18); box-shadow: 0 4px 14px rgba(0,0,0,0.5), inset 0 0 12px rgba(0,0,0,0.35); }
+  .profileIdentity { flex: 1; min-width: 0; }
+  .profileIdentity .pUsername { font-size: 19px; font-weight: 800; color: #e8e2d0; letter-spacing: 0.5px; }
+  .profileIdentity .pMemberSince { margin: 4px 0 0; font-size: 12px; color: #6b6350; }
+  .rankBadge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px 5px 10px; border-radius: 20px; font-size: 11px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; margin-top: 8px; border: 1px solid rgba(255,255,255,0.15); }
+  .rankBadge .rankDot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+  .rank-bronze   { background: linear-gradient(135deg,#5b3a20,#7a5330); color: #e3b98a; }
+  .rank-silver   { background: linear-gradient(135deg,#4a4d52,#6b6f75); color: #e6e9ec; }
+  .rank-gold     { background: linear-gradient(135deg,#6e5417,#a3801f); color: #ffd766; }
+  .rank-platinum { background: linear-gradient(135deg,#1e5c56,#2f8a80); color: #8fffef; }
+  .rank-diamond  { background: linear-gradient(135deg,#1c3f6e,#2e63ab); color: #9cc8ff; }
+  .rank-crown    { background: linear-gradient(135deg,#5c1c6e,#8a2fab); color: #e59cff; }
+  .rank-ace      { background: linear-gradient(135deg,#7a1414,#c81414); color: #ffb0b0; }
+  .statGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .statCard { background: rgba(20,18,14,0.7); border: 1px solid #332f24; border-radius: 8px; padding: 22px 10px; text-align: center; }
   .statCard .statVal { display: block; font-size: 28px; font-weight: 800; color: #e8c65a; }
   .statCard .statLabel { display: block; font-size: 11px; color: #948a70; letter-spacing: 1px; margin-top: 6px; text-transform: uppercase; }
+
   .colorField { display: flex; align-items: center; justify-content: space-between; background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; gap: 16px; }
   .colorField input[type=color] { width: 52px; height: 32px; border: 1px solid #4a4232; border-radius: 4px; background: none; padding: 0; cursor: pointer; flex-shrink: 0; }
-  .charPreviewRow { display: flex; align-items: center; gap: 14px; margin: 20px 0 28px; }
-  .charPreviewBox { width: 54px; height: 54px; border-radius: 8px; border: 1px solid #4a4232; flex-shrink: 0; }
-  .settingsRow { display: flex; align-items: center; justify-content: space-between; background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; gap: 20px; }
+
+  /* Settings: grouped into named sections (BGMI's settings menu is organized this way — Sound,
+     Sensitivity, etc.) rather than one flat list of rows. */
+  /* Closet: one section per slot (body, skin, hair, top ...) — option chips plus a color row. */
+  .closetSection { background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .closetSection > h3 { margin: 0 0 8px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #948a70; }
+  .chipRow { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 6px 12px; font-size: 12px; background: #1c1a15; color: #948a70; border: 1px solid #332f24; border-radius: 14px; }
+  .chip:hover { border-color: #b3924a; color: #d8c98a; }
+  .chip.active { background: #b3924a; color: #1a1710; border-color: #b3924a; }
+  .swatchRow { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; align-items: center; }
+  .swatch { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid rgba(255,255,255,0.14); }
+  .swatch.active { border-color: #e8c65a; box-shadow: 0 0 0 2px rgba(232,198,90,0.35); }
+  .swatchRow input[type=color] { width: 26px; height: 26px; padding: 0; border: 1px solid #4a4232; border-radius: 50%; background: none; cursor: pointer; }
+  .skinSlider { width: 100%; margin-top: 9px; height: 10px; -webkit-appearance: none; appearance: none; border-radius: 5px; background: var(--skin-grad, #888); }
+  .skinSlider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 22px; border-radius: 4px; background: #e8e2d0; border: 2px solid #1a1710; cursor: pointer; }
+  .skinSlider::-moz-range-thumb { width: 14px; height: 20px; border-radius: 4px; background: #e8e2d0; border: 2px solid #1a1710; cursor: pointer; }
+  .settingsSection { margin-bottom: 26px; }
+  .settingsSection > h3 { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: #948a70; margin: 0 0 10px; }
+  .settingsRow { display: flex; align-items: center; justify-content: space-between; background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 8px; padding: 14px 18px; margin-bottom: 10px; gap: 20px; }
+  .settingsRow > span:first-child { flex-shrink: 0; }
+  .settingsCredits { margin-top: 22px; padding-top: 14px; border-top: 1px solid #2f2a20; font-size: 12px; color: #8a8068; line-height: 1.5; }
+  .settingsCredits h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: #b3924a; }
+  .settingsCredits p { margin: 0 0 4px; }
+  .settingsCredits a { color: #d8c98a; }
+  .settingsRow .rowHint { display: block; font-size: 11px; color: #6b6350; font-weight: 400; margin-top: 2px; }
   .settingsRow input[type=range] { flex: 1; max-width: 240px; }
   .settingsRow .settingsVal { width: 42px; text-align: right; color: #e8c65a; font-variant-numeric: tabular-nums; font-size: 13px; flex-shrink: 0; }
   #menuScreen .panel { position: relative; }
@@ -223,6 +296,35 @@
      than a decal glued over it. */
   .btnBloodDecal { position: absolute; pointer-events: none; opacity: 0.65; mix-blend-mode: multiply; z-index: 2; }
   #matchTimer { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); font-size: 20px; font-weight: 700; color: #e8c65a; text-shadow: 0 2px 6px #000; font-variant-numeric: tabular-nums; }
+  /* Connection banner — shown while the socket is down / a match is being resumed. Sits above
+     everything (z-index 50) but never blocks input: it's information, not a modal. */
+  #connOverlay { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 50; pointer-events: none;
+    display: flex; align-items: center; gap: 10px; padding: 10px 18px; border-radius: 22px;
+    background: rgba(20,18,14,0.94); border: 1px solid #b3924a; color: #e8c65a; font-size: 13px; font-weight: 600;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.55); }
+  #connOverlay .connSpin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(232,198,90,0.3); border-top-color: #e8c65a; animation: connSpin 0.8s linear infinite; }
+  @keyframes connSpin { to { transform: rotate(360deg); } }
+  /* Chat: log at the lower-left above the health bar; the input only exists while typing. */
+  #chatLog { position: absolute; left: 16px; bottom: 132px; width: 360px; max-height: 190px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; gap: 3px; }
+  #chatLog .chatLine { padding: 3px 9px; border-radius: 4px; background: rgba(12,11,8,0.62); font-size: 13px; line-height: 1.35; color: #e8e2d0; text-shadow: 0 1px 2px #000; word-break: break-word; transition: opacity 0.6s; }
+  #chatLog .chatLine .cName { color: #e8c65a; font-weight: 700; }
+  #chatLog .chatLine.system { color: #948a70; font-style: italic; }
+  #chatLog .chatLine.faded { opacity: 0; }
+  #chatLog.open .chatLine.faded { opacity: 1; }
+  #chatHint { position: absolute; left: 16px; bottom: 108px; font-size: 11px; letter-spacing: 0.5px; color: #948a70; text-shadow: 0 1px 2px #000; pointer-events: none; }
+  #chatHint kbd { padding: 1px 6px; border: 1px solid #5a5240; border-radius: 3px; color: #d8c98a; font: inherit; font-weight: 700; }
+  #chatInput { position: absolute; left: 16px; bottom: 96px; width: 360px; margin: 0; pointer-events: auto; background: rgba(12,11,8,0.92); border-color: #b3924a; }
+  /* "Rejoin your match?" — shown after a refresh instead of dropping the player straight back in. */
+  #rejoinPrompt { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(6,5,3,0.78); }
+  #rejoinPrompt .rejoinBox { width: min(420px, 92vw); padding: 26px 28px 22px; border-radius: 10px; background: rgba(20,18,14,0.97); border: 1px solid #b3924a; box-shadow: 0 12px 48px rgba(0,0,0,0.7); text-align: center; }
+  #rejoinPrompt h2 { margin: 0 0 8px; color: #e8c65a; font-size: 20px; letter-spacing: 1px; text-transform: uppercase; }
+  #rejoinPrompt p { margin: 0 0 6px; color: #d8d0b8; font-size: 14px; line-height: 1.45; }
+  #rejoinPrompt .rejoinRoom { color: #e8c65a; font-weight: 700; }
+  #rejoinPrompt .rejoinWarn { color: #948a70; font-size: 12px; margin-bottom: 18px; }
+  #rejoinPrompt .rejoinBtns { display: flex; gap: 10px; }
+  #rejoinPrompt .rejoinBtns button { flex: 1; }
+  #rejoinPrompt .rejoinErr { color: #c94b4b; font-size: 13px; margin: 0 0 10px; }
+  .offlineTag { color: #c94b4b; font-size: 11px; margin-left: 6px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -262,12 +364,23 @@
     </aside>
     <main class="dashMain">
       <section class="dashPane" data-pane="play">
-        <div class="dashPaneInner">
-          <div class="dashPlayHero">
-            <img src="/images/wreckveil_logo.png" alt="" />
-            <h2>Ready up</h2>
-            <p class="sub">Join a friend's match, or start your own.</p>
-            <button id="dashPlayBtn" class="btn-primary dashPlayBtn">PLAY</button>
+        <div class="dashPaneInner wide">
+          <div class="dashSplitRow">
+            <div class="dashSplitMain">
+              <div class="dashPlayHero">
+                <img src="/images/wreckveil_logo.png" alt="" />
+                <h2>Ready up</h2>
+                <p class="sub">Join a friend's match, or start your own.</p>
+                <button id="dashPlayBtn" class="btn-primary dashPlayBtn">PLAY</button>
+              </div>
+            </div>
+            <div class="previewCardWrap">
+              <div class="previewCard" id="playPreviewSlot">
+                <div class="previewGlow"></div>
+                <div class="previewLabelBar"><span class="pname" id="playPreviewName">You</span></div>
+              </div>
+              <p class="sub">Your loadout, live</p>
+            </div>
           </div>
         </div>
       </section>
@@ -276,34 +389,43 @@
         <div class="dashPaneInner">
           <h2>Profile</h2>
           <p class="sub">Your lifetime stats across every match.</p>
+          <div class="profileHeader">
+            <div class="avatarCircle" id="profileAvatar"></div>
+            <div class="profileIdentity">
+              <div class="pUsername" id="profileUsername">–</div>
+              <p class="pMemberSince" id="profileMemberSince"></p>
+              <span class="rankBadge rank-bronze" id="profileRankBadge"><span class="rankDot"></span><span id="profileRankLabel">Unranked</span></span>
+            </div>
+          </div>
           <div class="statGrid">
             <div class="statCard"><span class="statVal" id="statKills">–</span><span class="statLabel">Kills</span></div>
             <div class="statCard"><span class="statVal" id="statDeaths">–</span><span class="statLabel">Deaths</span></div>
             <div class="statCard"><span class="statVal" id="statKD">–</span><span class="statLabel">K/D Ratio</span></div>
+            <div class="statCard"><span class="statVal" id="statWins">–</span><span class="statLabel">Wins</span></div>
+            <div class="statCard"><span class="statVal" id="statWinRate">–</span><span class="statLabel">Win Rate</span></div>
             <div class="statCard"><span class="statVal" id="statMatches">–</span><span class="statLabel">Matches</span></div>
           </div>
         </div>
       </section>
 
       <section class="dashPane" data-pane="character" hidden>
-        <div class="dashPaneInner">
+        <div class="dashPaneInner wide">
           <h2>Character</h2>
-          <p class="sub">Colors first — full character models are coming later.</p>
-          <div class="colorField">
-            <span>Primary color <span class="sub" style="margin:0;">(shows on your in-game model)</span></span>
-            <input type="color" id="primaryColorInput" value="#3d7dca" />
+          <p class="sub">Pick a body, skin tone and outfit — the preview updates live. Save to make it yours in every match.</p>
+          <div class="dashSplitRow">
+            <div class="dashSplitMain">
+              <div id="closet"></div>
+              <button id="saveCharacterBtn" class="btn-primary" style="width:auto;padding-left:28px;padding-right:28px;">Save</button>
+              <button id="resetCharacterBtn" class="btn-secondary" type="button" style="margin-left:8px;">Reset</button>
+              <span id="characterSaveMsg" class="sub" style="margin:0 0 0 12px;"></span>
+            </div>
+            <div class="previewCardWrap">
+              <div class="previewCard" id="characterPreviewSlot">
+                <div class="previewGlow"></div>
+                <div class="previewLabelBar"><span class="pname">Preview</span></div>
+              </div>
+            </div>
           </div>
-          <div class="colorField">
-            <span>Secondary color <span class="sub" style="margin:0;">(reserved for future use)</span></span>
-            <input type="color" id="secondaryColorInput" value="#c79b73" />
-          </div>
-          <div class="charPreviewRow">
-            <div class="charPreviewBox" id="charPreviewPrimary"></div>
-            <div class="charPreviewBox" id="charPreviewSecondary"></div>
-            <span class="sub" style="margin:0;">Other players see your primary color on your model.</span>
-          </div>
-          <button id="saveCharacterBtn" class="btn-primary" style="width:auto;padding-left:28px;padding-right:28px;">Save</button>
-          <span id="characterSaveMsg" class="sub" style="margin:0 0 0 12px;"></span>
         </div>
       </section>
 
@@ -311,15 +433,51 @@
         <div class="dashPaneInner">
           <h2>Settings</h2>
           <p class="sub">Saved on this device.</p>
-          <div class="settingsRow">
-            <span>Master Volume</span>
-            <input type="range" id="masterVolumeInput" min="0" max="100" value="80" />
-            <span class="settingsVal" id="masterVolumeVal">80%</span>
+
+          <div class="settingsSection">
+            <h3>Sound</h3>
+            <div class="settingsRow">
+              <span>Master Volume</span>
+              <input type="range" id="masterVolumeInput" min="0" max="100" value="80" />
+              <span class="settingsVal" id="masterVolumeVal">80%</span>
+            </div>
+            <div class="settingsRow">
+              <span>Music Volume</span>
+              <input type="range" id="musicVolumeInput" min="0" max="100" value="70" />
+              <span class="settingsVal" id="musicVolumeVal">70%</span>
+            </div>
+            <div class="settingsRow">
+              <span>Effects Volume</span>
+              <input type="range" id="sfxVolumeInput" min="0" max="100" value="100" />
+              <span class="settingsVal" id="sfxVolumeVal">100%</span>
+            </div>
           </div>
-          <div class="settingsRow">
-            <span>Mouse Sensitivity</span>
-            <input type="range" id="mouseSensInput" min="20" max="200" value="100" />
-            <span class="settingsVal" id="mouseSensVal">100%</span>
+
+          <div class="settingsSection">
+            <h3>Sensitivity</h3>
+            <div class="settingsRow">
+              <span>Mouse Sensitivity</span>
+              <input type="range" id="mouseSensInput" min="20" max="200" value="100" />
+              <span class="settingsVal" id="mouseSensVal">100%</span>
+            </div>
+          </div>
+
+          <div class="settingsSection">
+            <h3>Gameplay</h3>
+            <div class="settingsRow">
+              <span>Field of View<span class="rowHint">Higher sees more, lower zooms in slightly</span></span>
+              <input type="range" id="fovInput" min="60" max="110" value="75" />
+              <span class="settingsVal" id="fovVal">75°</span>
+            </div>
+            <div class="settingsRow">
+              <span>Sprint Mode<span class="rowHint">Toggle: tap Shift once to run. Hold: keep Shift held down</span></span>
+              <button id="sprintModeToggle" class="memeToggle off" type="button">HOLD</button>
+            </div>
+          </div>
+          <div class="settingsCredits">
+            <h3>Credits</h3>
+            <p>Grenade model: <a href="https://sketchfab.com/3d-models/m67-hand-grenade-b3aea06971d041f2ac0a119d5452811d" target="_blank" rel="noopener">"M67 Hand Grenade"</a> by Loukey, licensed <a href="http://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> (resized textures, split into parts).</p>
+            <p>Characters, animations and weapons: Quaternius (CC0).</p>
           </div>
         </div>
       </section>
@@ -384,11 +542,26 @@
         <tr><td>R</td><td>Reload</td></tr>
         <tr><td>Hold G, release</td><td>Aim and throw a grenade (shows the landing arc while held)</td></tr>
         <tr><td>Tab</td><td>Scoreboard</td></tr>
+        <tr><td>Enter</td><td>Open chat — type, Enter to send, Esc to cancel</td></tr>
       </tbody>
     </table>
     <button id="closeControlsBtn" class="btn-secondary" style="width:100%;margin-top:16px;">Close</button>
   </div>
 </div>
+
+<div id="rejoinPrompt" hidden>
+  <div class="rejoinBox">
+    <h2>Rejoin your match?</h2>
+    <p>You were in <span class="rejoinRoom" id="rejoinRoomName">a match</span> when this page closed.</p>
+    <p class="rejoinWarn">Choosing "No" removes you from that match and clears your kills and deaths in it.</p>
+    <p class="rejoinErr" id="rejoinErr" hidden></p>
+    <div class="rejoinBtns">
+      <button id="rejoinNoBtn" class="btn-secondary">No, leave it</button>
+      <button id="rejoinYesBtn" class="btn-primary">Yes, rejoin</button>
+    </div>
+  </div>
+</div>
+<div id="connOverlay" hidden><span class="connSpin"></span><span id="connText">Reconnecting...</span></div>
 
 <div id="gameContainer" hidden></div>
 
@@ -401,6 +574,9 @@
     <div class="ch-tick ch-right"></div>
   </div>
   <div id="roomTag"></div>
+  <div id="chatLog"></div>
+  <div id="chatHint"><kbd>Enter</kbd> chat</div>
+  <input id="chatInput" type="text" maxlength="200" placeholder="Say something...  Enter to send, Esc to cancel" hidden autocomplete="off" />
   <div id="matchTimer" hidden></div>
   <canvas id="minimap" width="150" height="150"></canvas>
   <div id="healthWrap">

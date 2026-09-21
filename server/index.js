@@ -6,6 +6,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { pool } from './db.js';
+import { sanitizeAppearance } from '../shared/appearance.js';
 import {
   WEAPONS, MAX_HEALTH, RESPAWN_MS, MAX_PLAYERS_PER_ROOM, SPAWN_POINTS, SPAWN_SAFE_DIST,
   PRONE_HEAD_OFFSET, HEAD_CENTER_Y, HEAD_HALF, CROUCH_SCALE_Y, PLAYER_RADIUS, getMapLayout,
@@ -17,11 +18,20 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
+const RECONNECT_GRACE_MS = Number(process.env.WRECKVEIL_GRACE_MS) || 30000; // how long a dropped player's slot is held before they're removed (env override is for tests)
+const HEARTBEAT_MS = 10000;       // ping cadence; a socket that misses one full cycle is cut
+const CHAT_MAX_LEN = 200, CHAT_HISTORY = 40, CHAT_COOLDOWN_MS = 400;
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/vendor/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build')));
+// GLTFLoader/FBXLoader/SkeletonUtils etc. — not part of the core 'three' package export, but
+// shipped inside the same npm package under examples/jsm. Served as its own tree (not copied
+// into public/) so its many internal relative imports (loaders -> ../libs/fflate.module.js,
+// ../curves/NURBSCurve.js, etc.) keep resolving correctly; their own `from 'three'` imports
+// resolve via the page's existing import map regardless of which path loaded them.
+app.use('/vendor/three-examples', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'examples', 'jsm')));
 app.use('/shared', express.static(path.join(__dirname, '..', 'shared')));
 
 // ---------- Auth + profile/customization: Postgres-backed (see server/db.js, server/db/schema.sql) ----------
@@ -45,7 +55,7 @@ function isValidHexColor(c) {
 }
 
 async function getUserByUsername(username) {
-  const { rows } = await pool.query('SELECT id, username, password_salt, password_hash FROM users WHERE username = $1', [username]);
+  const { rows } = await pool.query('SELECT id, username, password_salt, password_hash, created_at FROM users WHERE username = $1', [username]);
   return rows[0] || null;
 }
 
@@ -106,19 +116,20 @@ app.get('/api/profile', async (req, res) => {
     const user = await getUserByUsername(username);
     if (!user) return res.status(404).json({ ok: false, error: 'No such account.' });
     const [statsRes, custRes] = await Promise.all([
-      pool.query('SELECT kills, deaths, matches_played FROM player_stats WHERE user_id = $1', [user.id]),
-      pool.query('SELECT primary_color, secondary_color FROM player_customization WHERE user_id = $1', [user.id]),
+      pool.query('SELECT kills, deaths, matches_played, wins FROM player_stats WHERE user_id = $1', [user.id]),
+      pool.query('SELECT appearance FROM player_customization WHERE user_id = $1', [user.id]),
     ]);
-    const stats = statsRes.rows[0] || { kills: 0, deaths: 0, matches_played: 0 };
-    const cust = custRes.rows[0] || { primary_color: '#3d7dca', secondary_color: '#c79b73' };
+    const stats = statsRes.rows[0] || { kills: 0, deaths: 0, matches_played: 0, wins: 0 };
+    const cust = custRes.rows[0] || {};
     res.json({
       ok: true,
       username: user.username,
       kills: stats.kills,
       deaths: stats.deaths,
       matchesPlayed: stats.matches_played,
-      primaryColor: cust.primary_color,
-      secondaryColor: cust.secondary_color,
+      wins: stats.wins,
+      memberSince: user.created_at,
+      appearance: sanitizeAppearance(cust.appearance),
     });
   } catch (err) {
     console.error('profile fetch failed:', err);
@@ -127,20 +138,21 @@ app.get('/api/profile', async (req, res) => {
 });
 
 app.post('/api/customization', async (req, res) => {
-  const { username, primaryColor, secondaryColor } = req.body || {};
-  if (!isValidUsername(username) || !isValidHexColor(primaryColor) || !isValidHexColor(secondaryColor)) {
+  const { username, appearance } = req.body || {};
+  if (!isValidUsername(username) || !appearance || typeof appearance !== 'object') {
     return res.status(400).json({ ok: false, error: 'Invalid customization data.' });
   }
+  const clean = sanitizeAppearance(appearance);
   try {
     const user = await getUserByUsername(username);
     if (!user) return res.status(404).json({ ok: false, error: 'No such account.' });
     await pool.query(
-      `INSERT INTO player_customization (user_id, primary_color, secondary_color, updated_at)
-       VALUES ($1, $2, $3, now())
-       ON CONFLICT (user_id) DO UPDATE SET primary_color = $2, secondary_color = $3, updated_at = now()`,
-      [user.id, primaryColor, secondaryColor]
+      `INSERT INTO player_customization (user_id, appearance, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (user_id) DO UPDATE SET appearance = $2, updated_at = now()`,
+      [user.id, JSON.stringify(clean)]
     );
-    res.json({ ok: true });
+    res.json({ ok: true, appearance: clean });
   } catch (err) {
     console.error('customization save failed:', err);
     res.status(500).json({ ok: false, error: 'Server error.' });
@@ -210,7 +222,7 @@ function broadcastRoomList() {
 // who've since disconnected — a room's own scoreboard, not just "whoever's currently online".
 // (Previously a player's kills/deaths vanished from the board the instant they left.)
 function leaderboardOf(room) {
-  const active = [...room.players.values()].map((p) => ({ id: p.id, name: p.name, kills: p.kills, deaths: p.deaths }));
+  const active = [...room.players.values()].map((p) => ({ id: p.id, name: p.name, kills: p.kills, deaths: p.deaths, dc: !!p.disconnected }));
   const left = room.leftStats ? [...room.leftStats.values()] : [];
   return [...active, ...left].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
 }
@@ -221,7 +233,21 @@ function broadcastLeaderboard(room) {
 
 function endMatch(room) {
   if (!rooms.has(room.id)) return; // room already emptied out and got cleaned up
+  room.ended = true; // reconnecting players get the final scoreboard replayed (see 'reconnect')
   broadcastRoom(room, { type: 'matchEnded', list: leaderboardOf(room) });
+  // Win credit: the top-kills CURRENTLY-CONNECTED player only (not leaderboardOf's merged
+  // active+disconnected list — a player who already left shouldn't collect a win for a match
+  // they weren't around to finish), and only if they actually scored a kill (an empty/instant
+  // match crediting a 0-kill "winner" would be a meaningless stat). accountId-linked only, same
+  // as every other persisted stat in this file.
+  let top = null;
+  for (const p of room.players.values()) {
+    if (p.accountId && (!top || p.kills > top.kills)) top = p;
+  }
+  if (top && top.kills > 0) {
+    pool.query('UPDATE player_stats SET wins = wins + 1, updated_at = now() WHERE user_id = $1', [top.accountId])
+      .catch((err) => console.error('win persist failed:', err));
+  }
 }
 
 function respawn(target, room) {
@@ -233,6 +259,9 @@ function respawn(target, room) {
 }
 
 function applyDamage(shooter, target, dmg, room, weaponName) {
+  // Single choke point: a player whose connection dropped (slot held for the reconnect grace period) can
+  // never be damaged, whatever the source. The callers below also skip them, this makes it airtight.
+  if (target.disconnected) return;
   target.health = Math.max(0, target.health - dmg);
   // `weapon` lets the target's own client tell a grenade hit apart from a bullet/melee one —
   // used for the ear-ringing effect, which should only play for someone actually caught in a
@@ -271,7 +300,7 @@ function applyDamage(shooter, target, dmg, room, weaponName) {
 // flow as a combat kill, just no killer credited; the client tells the kill feed apart via
 // `killerId === null`.
 function killByEnvironment(target, room, reason) {
-  if (!target.alive) return;
+  if (!target.alive || target.disconnected) return; // same rule: a held slot is untouchable
   target.health = 0;
   target.alive = false;
   target.deaths += 1;
@@ -412,7 +441,7 @@ function checkPickups(room) {
   for (const pickup of room.pickups) {
     if (!pickup.active) continue;
     for (const player of room.players.values()) {
-      if (!player.alive) continue;
+      if (!player.alive || player.disconnected) continue;
       const dx = player.pos[0] - pickup.pos[0], dz = player.pos[2] - pickup.pos[2];
       if (dx * dx + dz * dz > PICKUP_RADIUS * PICKUP_RADIUS) continue;
 
@@ -460,7 +489,7 @@ function handleAttack(player, room, weaponIdx, origin, dir) {
   let bestDist = Infinity;
   let bestHeadYMin = 0, bestHeadYMax = 0;
   for (const other of room.players.values()) {
-    if (other.id === player.id || !other.alive) continue;
+    if (other.id === player.id || !other.alive || other.disconnected) continue; // a dropped player is untouchable while their slot is held
     const [headYMin, headYMax] = headBandFor(other);
     const yMin = other.pos[1];
     // Standing/crouch: the head band's own top IS the top of the model, so the overall
@@ -554,7 +583,7 @@ function explodeGrenade(room, grenade) {
   // no thrower exclusion here on purpose — a grenade you're standing too close to when it
   // goes off hurts you too, same as everyone else in the blast.
   for (const p of room.players.values()) {
-    if (!p.alive) continue;
+    if (!p.alive || p.disconnected) continue;
     const toP = vecSub(p.pos, grenade.pos);
     const dist = vecLen(toP);
     if (dist > GRENADE_BLAST_RADIUS) continue;
@@ -584,6 +613,15 @@ function explodeGrenade(room, grenade) {
 // find the closest point on the box to the grenade center, and if that's within the collision
 // radius, push the grenade back out along that direction and reflect its velocity across it
 // (with energy loss), i.e. an actual bounce off the wall/corner instead of passing through.
+// Impact bookkeeping for the bounce SOUND (clients play a clink/knock at the impact point): the physics
+// below only READS what it already computes and notes the hardest hit of the tick on the grenade — it
+// never changes a position or velocity. `surface` is 'ground' for anything facing up (floor, stairs,
+// the top of a wall) and 'wall' otherwise.
+function noteGrenadeImpact(g, surface, speed) {
+  if (!g.impact || speed > g.impact.speed) g.impact = { surface, speed };
+}
+const GRENADE_BOUNCE_MIN_SPEED = 2.5;   // slower than this is rolling/settling, not a bounce worth a sound
+const GRENADE_BOUNCE_MIN_GAP_MS = 150;  // and no more than one bounce sound per grenade per 150 ms
 const GRENADE_WALL_MARGIN = 0.15;
 function resolveGrenadeWallBounce(g, obstacles) {
   const r = GRENADE_RADIUS + GRENADE_WALL_MARGIN;
@@ -621,6 +659,7 @@ function resolveGrenadeWallBounce(g, obstacles) {
     g.pos[0] += nx * overlap; g.pos[1] += ny * overlap; g.pos[2] += nz * overlap;
     const vDotN = g.vel[0] * nx + g.vel[1] * ny + g.vel[2] * nz;
     if (vDotN < 0) {
+      noteGrenadeImpact(g, ny > 0.7 ? 'ground' : 'wall', -vDotN);
       const restitution = 0.45;
       g.vel[0] -= (1 + restitution) * vDotN * nx;
       g.vel[1] -= (1 + restitution) * vDotN * ny;
@@ -652,9 +691,16 @@ setInterval(() => {
         const localGroundY = GRENADE_RADIUS + rampHeightAt(g.pos[0], g.pos[2], room.ramps);
         if (g.pos[1] <= localGroundY) {
           g.pos[1] = localGroundY;
-          if (Math.abs(g.vel[1]) > 1) { g.vel[1] *= -0.35; g.vel[0] *= 0.7; g.vel[2] *= 0.7; }
+          if (Math.abs(g.vel[1]) > 1) { noteGrenadeImpact(g, 'ground', Math.abs(g.vel[1])); g.vel[1] *= -0.35; g.vel[0] *= 0.7; g.vel[2] *= 0.7; }
           else { g.vel[0] = 0; g.vel[1] = 0; g.vel[2] = 0; }
         }
+      }
+      if (g.impact) {
+        if (g.impact.speed >= GRENADE_BOUNCE_MIN_SPEED && now - (g.lastBounceAt || 0) >= GRENADE_BOUNCE_MIN_GAP_MS) {
+          g.lastBounceAt = now;
+          broadcastRoom(room, { type: 'grenadeBounce', id: g.id, pos: [g.pos[0], g.pos[1], g.pos[2]], surface: g.impact.surface, speed: Math.round(g.impact.speed * 10) / 10 });
+        }
+        g.impact = null;
       }
       if (now - g.born >= GRENADE_FUSE_MS) {
         explodeGrenade(room, g);
@@ -668,6 +714,8 @@ setInterval(() => {
 
 wss.on('connection', (ws) => {
   ws.id = nextPlayerId++;
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
   ws.roomId = null;
 
   ws.on('message', async (raw) => {
@@ -680,7 +728,7 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'hello') {
       ws.name = String(msg.name || 'Player').slice(0, 16);
-      if (isValidHexColor(msg.color)) ws.color = msg.color;
+      if (msg.appearance && typeof msg.appearance === 'object') ws.appearance = sanitizeAppearance(msg.appearance);
       // Stored synchronously — the actual DB lookup happens inline inside joinRoom(), awaited
       // right before the player object is created. An async lookup fired here instead (and
       // merely hoped to finish in time) lost this race in practice every single time: the real
@@ -702,7 +750,7 @@ wss.on('connection', (ws) => {
       // to hand back to every joining client via the `joined` message so they all render the
       // same thing, not used in any server-side collision/physics call.
       const memeMode = msg.memeMode !== false;
-      const room = { id: makeRoomId(), name: String(msg.roomName || 'Ruins Match').slice(0, 24), map, memeMode, players: new Map(), leftStats: new Map() };
+      const room = { id: makeRoomId(), name: String(msg.roomName || 'Ruins Match').slice(0, 24), map, memeMode, players: new Map(), leftStats: new Map(), chat: [] };
       // Each room now gets its own map layout (the core arena + that theme's colored
       // extension) instead of a single shared global obstacle list — walls+platforms combined
       // is exactly what the raycasting functions (bullets, grenade LOS, grenade wall bounce)
@@ -748,10 +796,59 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (msg.type === 'reconnect') {
+      const room = rooms.get(String(msg.roomId || ''));
+      const player = room && typeof msg.token === 'string' ? [...room.players.values()].find((p) => p.token === msg.token) : null;
+      if (!player) { send(ws, { type: 'reconnectFailed', reason: room ? 'expired' : 'roomGone' }); return; }
+      if (player.authUsername && ws.authUsername && player.authUsername !== ws.authUsername) { send(ws, { type: 'reconnectFailed', reason: 'forbidden' }); return; }
+      const old = player.ws;
+      player.ws = ws; ws.id = player.id; ws.roomId = room.id; ws.name = player.name;
+      if (old && old !== ws) { try { old.close(); } catch { /* already gone */ } } // second tab / half-dead socket: the newest connection wins
+      if (player.graceTimer) { clearTimeout(player.graceTimer); player.graceTimer = null; }
+      const wasDisconnected = player.disconnected;
+      player.disconnected = false;
+      sendJoined(ws, room, player, { reconnected: true });
+      if (room.ended) send(ws, { type: 'matchEnded', list: leaderboardOf(room) });
+      if (wasDisconnected) {
+        systemChat(room, `${player.name} reconnected`);
+        broadcastRoom(room, { type: 'playerStatus', id: player.id, status: 'reconnected' });
+        broadcastLeaderboard(room);
+      }
+      return;
+    }
+
+    // The player was asked "rejoin your match?" after a refresh and said no: take them out of that
+    // room for good. Unlike a normal leave, their kills/deaths are DROPPED rather than banked on the
+    // room's scoreboard (and so can't be reclaimed by name if they ever join that room again).
+    if (msg.type === 'abandon') {
+      const room = rooms.get(String(msg.roomId || ''));
+      const player = room && typeof msg.token === 'string' ? [...room.players.values()].find((p) => p.token === msg.token) : null;
+      if (player && !(player.authUsername && ws.authUsername && player.authUsername !== ws.authUsername)) {
+        removePlayer(room, player, { clearStats: true });
+      }
+      send(ws, { type: 'abandoned' }); // same answer whether or not the slot still existed — the client just moves on
+      return;
+    }
+
     const room = rooms.get(ws.roomId);
     if (!room) return;
     const player = room.players.get(ws.id);
     if (!player) return;
+
+    if (msg.type === 'leave') { // deliberate quit: no grace period, free the slot now
+      ws.roomId = null;
+      removePlayer(room, player);
+      return;
+    }
+
+    if (msg.type === 'chat') {
+      const text = String(msg.text || '').replace(/\s+/g, ' ').trim().slice(0, CHAT_MAX_LEN);
+      const now = Date.now();
+      if (!text || now - (player.lastChatAt || 0) < CHAT_COOLDOWN_MS) return;
+      player.lastChatAt = now;
+      pushChat(room, { id: player.id, name: player.name, text });
+      return;
+    }
 
     if (msg.type === 'state') {
       if (Array.isArray(msg.pos)) player.pos = msg.pos;
@@ -786,20 +883,76 @@ wss.on('connection', (ws) => {
     const room = rooms.get(ws.roomId);
     if (!room) return;
     const player = room.players.get(ws.id);
-    if (player && room.leftStats) {
-      room.leftStats.set(player.id, { id: player.id, name: player.name, kills: player.kills, deaths: player.deaths });
-    }
-    room.players.delete(ws.id);
-    broadcastRoom(room, { type: 'playerLeft', id: ws.id });
-    if (room.players.size === 0) {
-      if (room.matchEndTimer) clearTimeout(room.matchEndTimer);
-      rooms.delete(room.id);
-    } else {
-      broadcastLeaderboard(room);
-    }
-    broadcastRoomList();
+    // A socket that was already replaced (the player reconnected on a newer one) closing late
+    // must not touch the player it no longer owns.
+    if (!player || player.ws !== ws) return;
+    if (room.ended) { removePlayer(room, player); return; }
+    // Hold the slot instead of deleting it: a network blip, a refresh or a laptop sleep should
+    // come back into the same match with the same health/position/stats. Untouchable and
+    // flagged offline meanwhile; removePlayer() runs if they don't return in time.
+    player.disconnected = true;
+    player.moving = false; player.sprint = false;
+    systemChat(room, `${player.name} lost connection — holding their spot for ${RECONNECT_GRACE_MS / 1000}s`);
+    broadcastRoom(room, { type: 'playerStatus', id: player.id, status: 'disconnected' });
+    broadcastLeaderboard(room);
+    player.graceTimer = setTimeout(() => {
+      if (room.players.get(player.id) === player && player.disconnected) removePlayer(room, player);
+    }, RECONNECT_GRACE_MS);
   });
 });
+
+// ---------- Chat ----------
+function pushChat(room, entry) {
+  entry.t = Date.now();
+  room.chat.push(entry);
+  if (room.chat.length > CHAT_HISTORY) room.chat.shift();
+  broadcastRoom(room, { type: 'chat', ...entry });
+}
+function systemChat(room, text) { pushChat(room, { system: true, text }); }
+
+// The one place a player actually leaves a room (voluntary leave, grace period expiring, a
+// refresh that never came back): banks their stats for the scoreboard, tells everyone, and
+// deletes the room once it's empty.
+function removePlayer(room, player, { clearStats = false } = {}) {
+  if (player.graceTimer) clearTimeout(player.graceTimer);
+  if (room.leftStats && !clearStats) {
+    room.leftStats.set(player.id, { id: player.id, name: player.name, kills: player.kills, deaths: player.deaths });
+  }
+  room.players.delete(player.id);
+  broadcastRoom(room, { type: 'playerLeft', id: player.id });
+  systemChat(room, `${player.name} left the match`);
+  if (room.players.size === 0) {
+    if (room.matchEndTimer) clearTimeout(room.matchEndTimer);
+    rooms.delete(room.id);
+  } else {
+    broadcastLeaderboard(room);
+  }
+  broadcastRoomList();
+}
+
+// Everything a client needs to (re)enter a match. `you` is the server's record of the joining
+// player — on a reconnect it's what lets the client resume exactly where it was (health,
+// position, stats) instead of starting over.
+function sendJoined(ws, room, player, extra = {}) {
+  send(ws, {
+    type: 'joined',
+    roomId: room.id,
+    roomName: room.name,
+    map: room.map,
+    memeMode: room.memeMode !== false,
+    matchEndsAt: room.matchEndsAt || null,
+    playerId: player.id,
+    sessionToken: player.token,
+    weapons: WEAPONS,
+    you: { health: player.health, alive: player.alive, pos: player.pos, weapon: player.weapon, kills: player.kills, deaths: player.deaths },
+    chat: room.chat,
+    players: [...room.players.values()].map((p) => ({
+      id: p.id, name: p.name, pos: p.pos, rot: p.rot, weapon: p.weapon, health: p.health, alive: p.alive,
+      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint, appearance: p.appearance,
+    })),
+    ...extra,
+  });
+}
 
 async function joinRoom(ws, room) {
   ws.roomId = room.id;
@@ -837,7 +990,11 @@ async function joinRoom(ws, room) {
     ws,
     name,
     accountId,
-    color: ws.color || null,
+    appearance: ws.appearance || null,
+    token: crypto.randomBytes(16).toString('hex'), // secret that lets this player's next socket reclaim this slot
+    authUsername: ws.authUsername || null,
+    disconnected: false,
+    graceTimer: null,
     pos: randomSpawn(room),
     rot: [0, 0],
     weapon: 0,
@@ -862,21 +1019,9 @@ async function joinRoom(ws, room) {
     ).catch((err) => console.error('matches_played persist failed:', err));
   }
 
-  send(ws, {
-    type: 'joined',
-    roomId: room.id,
-    roomName: room.name,
-    map: room.map,
-    memeMode: room.memeMode !== false,
-    matchEndsAt: room.matchEndsAt || null,
-    playerId: player.id,
-    weapons: WEAPONS,
-    players: [...room.players.values()].map((p) => ({
-      id: p.id, name: p.name, pos: p.pos, rot: p.rot, weapon: p.weapon, health: p.health, alive: p.alive,
-      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint, color: p.color,
-    })),
-  });
-  broadcastRoom(room, { type: 'playerJoined', player: { id: player.id, name: player.name } }, player.id);
+  sendJoined(ws, room, player);
+  broadcastRoom(room, { type: 'playerJoined', player: { id: player.id, name: player.name, appearance: player.appearance } }, player.id);
+  systemChat(room, `${player.name} joined the match`);
   broadcastLeaderboard(room);
 }
 
@@ -887,13 +1032,23 @@ setInterval(() => {
     checkPickups(room);
     const players = [...room.players.values()].map((p) => ({
       id: p.id, pos: p.pos, rot: p.rot, weapon: p.weapon, health: p.health, alive: p.alive,
-      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint, color: p.color,
+      crouch: p.crouch, prone: p.prone, moving: p.moving, sprint: p.sprint,
     }));
     const grenades = (room.grenades || []).map((g) => ({ id: g.id, pos: g.pos }));
     const pickups = (room.pickups || []).filter((p) => p.active).map((p) => ({ idx: p.idx, pos: p.pos, type: p.type, weaponId: p.weaponId }));
     broadcastRoom(room, { type: 'state', players, grenades, pickups });
   }
 }, 50);
+
+// A connection that dies silently (unplugged cable, sleeping laptop) never fires 'close' on its
+// own for minutes — without this the 30s grace period wouldn't even START until the OS gave up.
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) { ws.terminate(); continue; }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, HEARTBEAT_MS);
 
 server.listen(PORT, () => {
   const nets = os.networkInterfaces();

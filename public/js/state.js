@@ -47,8 +47,11 @@ export const state = {
   yaw: 0,
 
   // ---- settings (dashboard's Settings tab owns the writes, persisted to localStorage there;
-  // movement.js/audio.js read these) ----
+  // movement.js/audio.js/world.js read these) ----
   mouseSensitivity: 1,
+  fov: 75,
+  toggleSprint: false, // false = hold Shift to sprint (default), true = tap Shift to toggle it
+  sprintToggledOn: false, // only meaningful while toggleSprint is true — movement.js owns this
 
   // ---- session/alive flags (death.js and the bootstrap's onMatchEnded own the writes; read
   // almost everywhere movement/firing/input needs to be frozen) ----
@@ -62,6 +65,7 @@ export const state = {
   // ---- input (ui.js's pointerlockchange owns pointerLocked; movement.js's key listeners own
   // the keys Set — both read from movement.js/weapons.js for gating input) ----
   pointerLocked: false,
+  chatOpen: false, // typing in the chat box: movement/fire/weapon hotkeys must ignore the keyboard
   keys: new Set(),
 
   // ---- match/session (bootstrap's onJoined/onMatchEnded own the writes) ----
