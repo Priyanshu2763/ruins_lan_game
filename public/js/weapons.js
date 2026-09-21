@@ -6,6 +6,8 @@ import {
 import { state } from './state.js';
 import { sfx, playBuffer, playPositionalOneShot, playPositionalLoopStart, updatePositionalTarget } from './audio.js';
 import { sendMsg } from './net.js';
+import { getRemoteGunMuzzle } from './characters.js';
+import { spawnMuzzleFlash, spawnSmoke } from './weaponfx.js';
 import { initViewmodel, kickViewmodel, setViewmodelAmmo, setTriggerHeld, throwKick, setViewmodelWeapon, startReloadAnim, cancelReloadAnim, raiseViewmodel, getMuzzleWorld, grenadeReady, grenadeThrow, grenadeCancel, isGrenadeBusy, onGrenadePin } from './viewmodel.js';
 
 const crosshair = document.getElementById('crosshair');
@@ -359,6 +361,9 @@ export function stopRemoteGunLoop(playerId) {
 export function handleRemoteShot(msg) {
   const w = WEAPONS[msg.weapon];
   if (!w) return;
+  // a visible muzzle flash (and a wisp of smoke) on the shooter's gun, so their shots can be SEEN as well as heard
+  const mz = getRemoteGunMuzzle(msg.playerId, msg.weapon);
+  if (mz) { spawnMuzzleFlash(mz, w.id === 1 ? 0.55 : w.id === 0 ? 0.32 : 0.22); if (Math.random() < 0.5) spawnSmoke(mz, new THREE.Vector3(0, 0.1, 0), w.id === 1 ? 0.14 : 0.06); }
   if (w.id === 0) {
     let entry = remoteGunLoops.get(msg.playerId);
     if (!entry) {

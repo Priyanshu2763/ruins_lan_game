@@ -781,6 +781,22 @@ chatInput.addEventListener('keydown', (e) => {
 });
 chatInput.addEventListener('keyup', (e) => e.stopPropagation());
 
+// ---------- Dashboard tips (rotating one-liners under the Play button) ----------
+const TIPS = [
+  '<b>Enter</b> opens chat during a match.',
+  'Hold <b>G</b> to aim a grenade, release to throw it.',
+  '<b>C</b> crouches and <b>Z</b> goes prone — a smaller target and a lower profile.',
+  'Headshots deal <b>2.5×</b> damage; a knife headshot is a one-hit kill.',
+  'Fire while sprinting and your weapon squares up — release to run again.',
+  'Lost connection? You have <b>30 s</b> to get back in, and nobody can hurt you meanwhile.',
+  'Drag your character on the right to spin it; pinch or scroll to zoom.',
+  'Shotgun damage falls off with distance — get close.',
+];
+const dashTip = document.getElementById('dashTip');
+let tipIdx = Math.floor(Math.random() * TIPS.length);
+function showTip() { if (!dashTip) return; dashTip.style.opacity = 0; setTimeout(() => { dashTip.innerHTML = TIPS[tipIdx++ % TIPS.length]; dashTip.style.opacity = 1; }, 400); }
+showTip(); setInterval(() => { if (!dashboardScreen.hidden) showTip(); }, 7000);
+
 // Kicks off the very first screen (dashboard or auth) — deliberately the LAST statement in this
 // module, not right after getAuth()/showDashboard/showAuth are defined. showDashboard() calls
 // into syncPreviewForPane(), which reads playPreviewSlot/characterPreviewSlot/activePane —

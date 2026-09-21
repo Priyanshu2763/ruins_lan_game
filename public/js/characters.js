@@ -542,6 +542,14 @@ export function getMuzzleAlongBarrel(weaponId) { const f = GUN_FIT[weaponId]; re
 
 const remotePlayers = new Map(); // id -> see createRemote below for the full shape
 
+// World position of the muzzle of another player's gun (for their muzzle flash), or null if unknown.
+export function getRemoteGunMuzzle(playerId, weaponId) {
+  const rp = remotePlayers.get(playerId), inst = rp && rp.fig.heldGuns.get(weaponId);
+  if (!inst || !GRIPS[weaponId]) return null;
+  inst.updateWorldMatrix(true, false);
+  return inst.localToWorld(new THREE.Vector3(getMuzzleAlongBarrel(weaponId), 0.01, 0));
+}
+
 // Drops every remote figure — used when a reconnect hands us a fresh, authoritative player list.
 export function clearRemotes() { for (const id of [...remotePlayers.keys()]) removeRemote(id); }
 

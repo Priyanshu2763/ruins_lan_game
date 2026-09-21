@@ -100,6 +100,10 @@
 
   .dashPlayHero { background: rgba(20,18,14,0.6); border: 1px solid #332f24; border-radius: 10px; padding: 40px 36px; text-align: center; }
   .dashPlayHero img { width: 96px; margin-bottom: 16px; filter: drop-shadow(0 6px 16px rgba(0,0,0,0.6)); }
+  /* width:0 + min-width:100% = the tip never contributes to the card's intrinsic width, so a longer tip can't
+     resize the Play card and push the character card sideways; it just wraps (2 lines reserved). */
+  .dashTip { width: 0; min-width: 100%; margin: 16px 0 0; min-height: 34px; line-height: 1.4; font-size: 12px; color: #8a8068; letter-spacing: 0.3px; transition: opacity 0.5s; }
+  .dashTip b { color: #d8c98a; }
   .dashPlayBtn { font-size: 20px; padding: 18px 0; letter-spacing: 3px; }
 
   /* Profile: identity header (avatar tinted with the player's own color + rank tier badge,
@@ -372,6 +376,7 @@
                 <h2>Ready up</h2>
                 <p class="sub">Join a friend's match, or start your own.</p>
                 <button id="dashPlayBtn" class="btn-primary dashPlayBtn">PLAY</button>
+                <p id="dashTip" class="dashTip"></p>
               </div>
             </div>
             <div class="previewCardWrap">

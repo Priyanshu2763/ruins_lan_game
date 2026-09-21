@@ -2349,3 +2349,9 @@ drag tilts the camera, pinch or scroll to zoom, double-click/tap resets, ⟲ ⟳
 Run / Crouch, cross-faded), weapon chips (AKM / Shotgun / Pistol / Knife) and a 📷 button that saves a transparent PNG.
 One code path for mouse/touch/pen (pointer events, `touch-action:none`). The character starts facing the camera.
 Same controls on the Play and Character tabs (`preview.js`, `.pvBar` CSS). Test: `rc13` 6/6.
+
+**Batch 69 addenda (same day):** other players' shots now show a muzzle flash (+ a wisp of smoke) on THEIR gun —
+`getRemoteGunMuzzle` (characters.js) + pooled `spawnMuzzleFlash` (weaponfx.js), triggered from `handleRemoteShot`
+(test `rc15`: 5 remote shots → 5 flash sprites). Their casings / slide / pump are still not animated. Dashboard Play
+pane got rotating one-line tips (`TIPS` in ui.js); the tip uses `width:0;min-width:100%` because a long tip
+previously widened the Play card and pushed the character card sideways (caught by the preview test).

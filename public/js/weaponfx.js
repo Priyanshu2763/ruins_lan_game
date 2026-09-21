@@ -6,6 +6,8 @@ import { state } from './state.js';
 import { sfx } from './audio.js';
 
 const G = -9.8;
+const flashes = []; // world muzzle flashes (other players' shots): {sprite, life, max, size}
+let flashTex = null;
 let inited = false;
 const casings = [];   // {mesh, vel, spin, life, rested, kind}
 const smokes = [];    // {sprite, vel, life, max, size}
@@ -57,6 +59,24 @@ export function spawnCasing(kind, pos, vel) {
   casings.push(c);
 }
 
+// A short additive star flash at `pos` (another player's muzzle). Pooled like everything else here.
+export function spawnMuzzleFlash(pos, size = 0.25) {
+  init();
+  if (!flashTex) {
+    const c = document.createElement('canvas'); c.width = c.height = 128;
+    const x = c.getContext('2d'); x.translate(64, 64);
+    const g = x.createRadialGradient(0, 0, 2, 0, 0, 62); g.addColorStop(0, 'rgba(255,250,215,1)'); g.addColorStop(0.35, 'rgba(255,205,110,0.85)'); g.addColorStop(1, 'rgba(255,140,40,0)');
+    x.fillStyle = g; x.beginPath();
+    for (let i = 0; i < 12; i++) { const a = (i / 12) * Math.PI * 2, r = i % 2 ? 22 : 62; x.lineTo(Math.cos(a) * r, Math.sin(a) * r); }
+    x.closePath(); x.fill(); flashTex = new THREE.CanvasTexture(c);
+  }
+  let f = flashes.length < 10 ? null : flashes.shift();
+  if (!f) f = { sprite: new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })), life: 0, max: 0.06, size };
+  f.sprite.position.copy(pos); f.life = 0; f.size = size; f.sprite.material.rotation = Math.random() * 6.28; f.sprite.material.opacity = 1;
+  f.sprite.scale.setScalar(size);
+  state.scene.add(f.sprite); flashes.push(f);
+}
+
 export function spawnSmoke(pos, dir, size = 0.12) {
   init();
   let s = smokes.length < 30 ? null : smokes.shift();
@@ -96,6 +116,11 @@ export function updateWeaponFx(dt) {
     }
     if (c.life > 4) { const k = Math.max(0, 1 - (c.life - 4) / 1); c.mesh.scale.setScalar(k); }
     if (c.life > 5) { state.scene.remove(c.mesh); casings.splice(i, 1); }
+  }
+  for (let i = flashes.length - 1; i >= 0; i--) {
+    const f = flashes[i]; f.life += dt; const k = f.life / f.max;
+    if (k >= 1) { state.scene.remove(f.sprite); flashes.splice(i, 1); continue; }
+    f.sprite.material.opacity = 1 - k; f.sprite.scale.setScalar(f.size * (1 - 0.3 * k));
   }
   for (let i = smokes.length - 1; i >= 0; i--) {
     const s = smokes[i]; s.life += dt; const k = s.life / s.max;
