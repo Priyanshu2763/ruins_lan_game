@@ -9,6 +9,11 @@ const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function unlockAudio() { if (audioCtx.state === 'suspended') audioCtx.resume(); }
 document.addEventListener('click', unlockAudio, { once: true });
 document.addEventListener('keydown', unlockAudio, { once: true });
+// Touch controls call preventDefault() on their own touchstart (to block native scroll/pinch-zoom
+// while dragging the joystick/look-zone/buttons), which can suppress the synthetic 'click' this
+// would otherwise rely on — a real gap, not just defensive, so touchstart gets its own explicit
+// unlock rather than trusting the click listener above to still fire on every touch device.
+document.addEventListener('touchstart', unlockAudio, { once: true });
 
 // Three-tier gain structure: every sound routes through EITHER musicGain or sfxGain first (so
 // the Settings tab's separate Music/SFX sliders are real independent controls, BGMI-style),

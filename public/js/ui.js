@@ -6,6 +6,8 @@ import { setMasterVolume, setMusicVolume, setSfxVolume } from './audio.js';
 import { setFov } from './world.js';
 import { mountPreviewInto, resizePreview, setPreviewAppearance, startPreviewLoop, stopPreviewLoop } from './preview.js';
 import { CHARACTERS, SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, SLOTS, MODES, OPERATORS, CAN_STRIP_CLOTHES, sanitizeAppearance } from '/shared/appearance.js';
+import { isTouchDevice, setTouchOverride, getTouchOverride } from './touchDetect.js';
+import { enterCustomizeMode, resetTouchLayout } from './touchLayout.js';
 
 // ---------- DOM ----------
 const authScreen = document.getElementById('authScreen');
@@ -487,6 +489,47 @@ sprintModeToggle.addEventListener('click', () => {
   localStorage.setItem('ruins_toggleSprint', toggleSprint ? '1' : '0');
 });
 
+// ---------- Settings tab: Touch Controls section — always visible (not just on detected touch
+// devices) specifically so the Force-Touch-UI override is discoverable on a hybrid touchscreen
+// laptop that auto-detected as desktop, or vice versa. Mirrors the mouseSensInput wiring pattern
+// exactly (same localStorage-per-device convention). ----------
+const touchSensInput = document.getElementById('touchSensInput');
+const touchSensVal = document.getElementById('touchSensVal');
+const forceTouchToggle = document.getElementById('forceTouchToggle');
+const customizeTouchBtn = document.getElementById('customizeTouchBtn');
+const resetTouchBtn = document.getElementById('resetTouchBtn');
+
+function refreshForceTouchToggle() {
+  const ov = getTouchOverride(); // '1' | '0' | null
+  forceTouchToggle.textContent = ov === '1' ? 'ON' : ov === '0' ? 'OFF' : 'AUTO';
+  forceTouchToggle.classList.toggle('on', ov === '1');
+  forceTouchToggle.classList.toggle('off', ov === '0');
+}
+refreshForceTouchToggle();
+forceTouchToggle.addEventListener('click', () => {
+  // Cycles AUTO -> ON -> OFF -> AUTO — a 3-state override, not a plain on/off toggle, so
+  // "go back to auto-detection" is always reachable without a separate reset control.
+  const ov = getTouchOverride();
+  const next = ov === null ? true : ov === '1' ? false : null;
+  setTouchOverride(next);
+  refreshForceTouchToggle();
+});
+
+const touchSens = (() => {
+  const saved = localStorage.getItem('ruins_touchLookSensitivity');
+  return saved !== null ? Number(saved) : 100;
+})();
+touchSensInput.value = touchSens; touchSensVal.textContent = `${touchSens}%`; state.touchLookSensitivity = touchSens / 100;
+touchSensInput.addEventListener('input', () => {
+  const sens = Number(touchSensInput.value);
+  touchSensVal.textContent = `${sens}%`;
+  state.touchLookSensitivity = sens / 100;
+  localStorage.setItem('ruins_touchLookSensitivity', String(sens));
+});
+
+customizeTouchBtn.addEventListener('click', () => enterCustomizeMode());
+resetTouchBtn.addEventListener('click', () => resetTouchLayout());
+
 // Every button in the UI gets 2 small blood-stain decals, picked randomly per button so no two
 // look the same — random source image per decal (both provided splatter photos get used, not
 // just one), random size/rotation/flip, 2 DIFFERENT corners (sampled without replacement, so
@@ -654,13 +697,28 @@ let everLocked = false; // first-ever lock shows the plain "click to enter" hint
 // Exported so the bootstrap can request the very first lock (there's no button-click available
 // to trigger it at that point) the same way lockHint/resumeBtn already do internally here.
 export function requestLock() { state.renderer.domElement.requestPointerLock(); }
-lockHint.addEventListener('click', requestLock);
-resumeBtn.addEventListener('click', requestLock);
+
+// Touch has no Pointer Lock equivalent at all — engageTouchControls()/resumeTouchControls()
+// (touchControls.js) are what actually flip state.controlsActive and hide/show lockHint/pauseMenu
+// on a touch device. touchControls.js registers them here via registerTouchLockHandlers instead of
+// this file importing touchControls.js directly, to avoid a circular import (touchControls.js
+// already needs to import lockHint/pauseMenu/openChat/closeChat FROM this file — see below).
+let touchEngage = null, touchResume = null;
+export function registerTouchLockHandlers(engage, resume) { touchEngage = engage; touchResume = resume; }
+
+if (isTouchDevice()) lockHint.textContent = 'Tap to enter — touch controls';
+lockHint.addEventListener('click', () => { if (isTouchDevice() && touchEngage) touchEngage(); else requestLock(); });
+resumeBtn.addEventListener('click', () => { if (isTouchDevice() && touchResume) touchResume(); else requestLock(); });
 pauseControlsBtn.addEventListener('click', () => { pauseMenu.hidden = true; controlsOpenedFromPause = true; controlsModal.hidden = false; });
+const pauseCustomizeBtn = document.getElementById('pauseCustomizeBtn');
+pauseCustomizeBtn.addEventListener('click', () => { pauseMenu.hidden = true; enterCustomizeMode(); });
 quitBtn.addEventListener('click', () => leaveMatchAndReload());
 
 document.addEventListener('pointerlockchange', () => {
   state.pointerLocked = document.pointerLockElement === state.renderer?.domElement;
+  state.controlsActive = state.pointerLocked; // desktop: these two always match. Touch sets
+                                               // controlsActive on its own, pointerLocked never
+                                               // becomes true there at all (no real Pointer Lock).
   if (!state.pointerLocked) closeChat(); // Esc (which drops the lock) also cancels a half-typed message
   if (state.pointerLocked) {
     everLocked = true;

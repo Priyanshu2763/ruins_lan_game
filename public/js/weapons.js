@@ -169,8 +169,10 @@ export function stopFiring() {
   stopAkmLoop();
   setTriggerHeld(false);
 }
-document.addEventListener('mousedown', (e) => {
-  if (!state.pointerLocked || e.button !== 0 || state.chatOpen || isGrenadeBusy()) return;
+// The actual "start firing" sequence — extracted so touchControls.js's fire button can trigger the
+// exact same thing (a shot, plus the auto-fire interval and AKM spray-loop start where applicable)
+// without synthesizing a fake MouseEvent. The mousedown listener below is now a thin wrapper.
+export function startFireSequence() {
   const w = WEAPONS[currentWeapon];
   // Checked BEFORE fire() runs, not after — this has to be "was there a bullet to fire",
   // not "is the mag still non-empty now": firing the LAST bullet legitimately drops the mag
@@ -185,6 +187,10 @@ document.addEventListener('mousedown', (e) => {
   fire();
   if (w.auto && hadAmmo) fireIntervalId = setInterval(fire, w.fireInterval);
   if (w.id === 0 && hadAmmo) akmLoopSource = playBuffer('akmFire', { loop: true });
+}
+document.addEventListener('mousedown', (e) => {
+  if (!state.pointerLocked || e.button !== 0 || state.chatOpen || isGrenadeBusy()) return;
+  startFireSequence();
 });
 document.addEventListener('mouseup', () => { stopFiring(); });
 
@@ -242,7 +248,7 @@ export function initTrajectoryVisuals() {
 }
 
 export function startGrenadeAim() {
-  if (!state.localAlive || !state.sceneReady || !state.pointerLocked || grenadeAiming) return;
+  if (!state.localAlive || !state.sceneReady || !state.controlsActive || grenadeAiming) return;
   if (grenadeCount <= 0) { sfx.empty(); return; }
   if (performance.now() - lastGrenadeThrow < GRENADE_COOLDOWN_MS) return;
   cancelReload(); // hands are busy — same as switching weapons: no partial reload

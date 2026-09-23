@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <title>Wreckveil</title>
 <link rel="icon" type="image/png" href="/favicon.png" />
 <style>
@@ -331,6 +331,69 @@
   #rejoinPrompt .rejoinBtns button { flex: 1; }
   #rejoinPrompt .rejoinErr { color: #c94b4b; font-size: 13px; margin: 0 0 10px; }
   .offlineTag { color: #c94b4b; font-size: 11px; margin-left: 6px; }
+
+  /* ---------- Touch controls (touchControls.js builds these; this is styling only) ----------
+     CSS/SVG-only, zero image assets — same approach as the crosshair/health-bar/stance-label
+     above, and the reason "optimized/smallest" doesn't cost anything extra here. Palette reused
+     exactly from the existing HUD (rgba(20,18,14,...) fill, #4a4232 border, #d8c98a text) so
+     these read as part of the same interface, not a bolted-on control scheme. */
+  #touchControls { position: fixed; inset: 0; z-index: 3; touch-action: none; }
+  #touchControls > * { pointer-events: auto; }
+  .tcBtn { position: absolute; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.72);
+    display: flex; align-items: center; justify-content: center; font: 700 11px system-ui, sans-serif;
+    color: #d8c98a; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .tcBtn:active { background: rgba(42,36,20,0.9); border-color: #b3924a; }
+  .tcBtnLg { width: 84px; height: 84px; font-size: 13px; color: #e8c65a; border-color: #b3924a; }
+  #tcFire { background: rgba(60,18,18,0.55); }
+  .tcBtnSm { width: 54px; height: 54px; }
+  .tcJumpIcon::before { content: ''; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 12px solid #d8c98a; }
+  .tcJoystickBase { position: absolute; width: 120px; height: 120px; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.55); touch-action: none; }
+  .tcJoystickKnob { position: absolute; top: 50%; left: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%; background: rgba(216,201,138,0.85); transition: transform 0.03s linear; pointer-events: none; }
+  #tcLookZone { position: absolute; top: 0; right: 0; bottom: 0; touch-action: none; }
+  #tcLookZoneHandle { position: absolute; top: 0; bottom: 0; width: 14px; margin-left: -7px; touch-action: none; cursor: ew-resize; }
+  .tcCustomizing #tcLookZoneHandle { background: rgba(232,198,90,0.25); border-left: 1px dashed #e8c65a; border-right: 1px dashed #e8c65a; }
+  #tcPauseBtn, #tcChatBtn { position: absolute; width: 40px; height: 40px; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.72); color: #d8c98a; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+  #tcPauseBtn { top: 12px; right: 12px; } /* top-right, out of the way of the joystick/fire cluster and the minimap */
+  #tcChatBtn { top: 128px; left: 10px; } /* directly under the mobile-shrunk minimap's box (top:10px + height:110px + gap, see @media below) */
+  #tcDoneBtn { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); padding: 8px 22px; border-radius: 6px; border: 1px solid #b3924a; background: rgba(42,36,20,0.95); color: #e8c65a; font-weight: 700; z-index: 4; }
+  .tcCustomizing .tcBtn, .tcCustomizing .tcJoystickBase { outline: 2px dashed #e8c65a; outline-offset: 2px; }
+  #rotateOverlay { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; text-align: center; padding: 40px; background: #10100e; color: #d8c98a; font-size: 18px; }
+
+  /* First @media query in the project — same signal touchDetect.js's isTouchDevice() uses
+     (pointer: coarse), so the CSS layout and the JS control-detection logic always agree on
+     "is this a touch session". Repositions the desktop HUD elements that would otherwise sit
+     directly under the joystick/fire-button cluster; the minimap shrinks via CSS size ONLY (its
+     150x150 canvas buffer and ui.js's MINIMAP_SIZE drawing math are untouched — the browser
+     downscales the higher-res buffer into the smaller box, which stays crisp). First-pass
+     offsets, sized against the default touchLayout.js cluster geometry — a real device/emulator
+     screenshot pass would still be worth doing to fine-tune these, not a one-shot guess to trust
+     blindly. */
+  @media (pointer: coarse) {
+    /* The whole left column (minimap, chat button, chat log, health bar) is TOP-anchored and
+       stacked with fixed gaps — found by actually screenshotting the first pass (bottom-anchored
+       chatLog/healthWrap plus a bottom-anchored joystick meant two independently-computed
+       "distance from bottom" values had to happen to clear each other, which they didn't: the
+       joystick's semi-transparent base was rendering visibly ON TOP of the health bar, and
+       chatLog's system "X joined the match" line landed directly over the minimap). Top-anchoring
+       the whole stack makes every element's position deterministic regardless of exact viewport
+       height, at the cost of needing the joystick's own default Y nudged down to clear the
+       bottom of the stack — still fully repositionable via the customize mode regardless. Tested
+       at 844x390 (a representative small landscape phone height); a taller device only gains
+       clearance, never loses it, but this is still a first pass worth a real-device glance. */
+    #minimap { top: 6px; left: 6px; width: 80px; height: 80px; }
+    #tcChatBtn { top: 92px; left: 6px; width: 36px; height: 36px; }
+    #roomTag { display: none; } /* not critical during play; the dashboard already shows room info, and this column has no room to spare */
+    #chatLog { top: 132px; left: 6px; bottom: auto; width: 190px; max-height: 55px; }
+    #chatInput { top: 132px; left: 6px; bottom: auto; width: 190px; }
+    #healthWrap { left: 6px; top: 193px; bottom: auto; width: 160px; }
+    #weaponBar { right: 16px; bottom: 260px; gap: 6px; }
+    .weaponCard { width: 68px; padding: 6px 4px; }
+    .weaponCard .wImg { max-width: 56px; max-height: 26px; }
+    #killFeed { top: 10px; right: 60px; width: 190px; font-size: 11px; }
+    #chatHint { display: none; } /* touch has its own #tcChatBtn instead of an Enter-key hint */
+    #pickupToast { bottom: 170px; }
+  }
+
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -470,6 +533,24 @@
           </div>
 
           <div class="settingsSection">
+            <h3>Touch Controls</h3>
+            <div class="settingsRow">
+              <span>Force Touch UI<span class="rowHint">Override auto-detection on this device</span></span>
+              <button id="forceTouchToggle" class="memeToggle off" type="button">AUTO</button>
+            </div>
+            <div class="settingsRow">
+              <span>Look Sensitivity</span>
+              <input type="range" id="touchSensInput" min="20" max="200" value="100" />
+              <span class="settingsVal" id="touchSensVal">100%</span>
+            </div>
+            <div class="settingsRow">
+              <span>Layout<span class="rowHint">Drag any control to reposition it</span></span>
+              <button id="customizeTouchBtn" class="btn-secondary" type="button">Edit Positions</button>
+              <button id="resetTouchBtn" class="btn-secondary" type="button">Reset</button>
+            </div>
+          </div>
+
+          <div class="settingsSection">
             <h3>Gameplay</h3>
             <div class="settingsRow">
               <span>Field of View<span class="rowHint">Higher sees more, lower zooms in slightly</span></span>
@@ -597,6 +678,12 @@
   <div id="centerMsg" hidden></div>
 </div>
 
+<!-- Built entirely by touchControls.js (no static children here) — one container that self-
+     populates only on a detected/forced touch device, everything else in this file stays
+     byte-identical to the desktop path. -->
+<div id="touchControls" hidden></div>
+<div id="rotateOverlay" hidden>Please rotate your device — Wreckveil plays in landscape</div>
+
 <div id="lockHint" hidden>Click to enter — mouse look, WASD move, Space jump, click to fire</div>
 
 <div id="pauseMenu" class="screen" hidden style="background:rgba(10,9,7,0.75);">
@@ -605,6 +692,7 @@
     <p class="sub">mouse released</p>
     <button id="resumeBtn" class="btn-primary" style="width:100%;margin-bottom:10px;">Resume</button>
     <button id="pauseControlsBtn" class="btn-secondary" style="width:100%;margin-bottom:10px;">Controls</button>
+    <button id="pauseCustomizeBtn" class="btn-secondary" style="width:100%;margin-bottom:10px;">Edit Touch Controls</button>
     <button id="quitBtn" class="btn-secondary" style="width:100%;">Quit to Menu</button>
   </div>
 </div>

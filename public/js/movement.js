@@ -207,15 +207,24 @@ export function updateMovement(dt) {
   setFootstepMode(!state.isMoving ? null : sprinting ? 'run' : 'walk');
 }
 
+// Shared look-direction math — extracted so touchControls.js's look-drag zone can apply the exact
+// same yaw/pitch update from manually-computed touch deltas (no Pointer Lock / movementX equivalent
+// exists off a real mouse) instead of duplicating this logic. `dx`/`dy` are movement-style deltas
+// (mouse: e.movementX/Y; touch: raw CSS-pixel finger delta), `sensMul` is the caller's own
+// sensitivity multiplier (state.mouseSensitivity or state.touchLookSensitivity).
+export function applyLookDelta(dx, dy, sensMul) {
+  const sens = 0.0022 * sensMul;
+  state.yaw -= dx * sens;
+  state.pitch -= dy * sens;
+  state.pitch = Math.max(-1.3, Math.min(1.3, state.pitch));
+  state.yawObject.rotation.y = state.yaw;
+  state.camera.rotation.x = state.pitch;
+}
+
 // Mouse look — frozen while dead too, not just unlocked, otherwise mouse movement during the
 // death-fall sequence would fight the scripted camera drop/tilt (see death.js's updateDeathAnim,
 // which drives camera.rotation.x/z directly).
 document.addEventListener('mousemove', (e) => {
   if (!state.pointerLocked || !state.localAlive) return;
-  const sens = 0.0022 * state.mouseSensitivity;
-  state.yaw -= e.movementX * sens;
-  state.pitch -= e.movementY * sens;
-  state.pitch = Math.max(-1.3, Math.min(1.3, state.pitch));
-  state.yawObject.rotation.y = state.yaw;
-  state.camera.rotation.x = state.pitch;
+  applyLookDelta(e.movementX, e.movementY, state.mouseSensitivity);
 });

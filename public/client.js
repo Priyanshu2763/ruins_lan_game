@@ -29,6 +29,7 @@ import { updateWeaponFx } from './js/weaponfx.js';
 import { guestAppearance } from '/shared/appearance.js';
 import { onLocalDeath, onLocalRespawn, updateDeathAnim, setHealth, flashDamage } from './js/death.js';
 import { updateMovement, setStance, setFootstepMode, tryJump } from './js/movement.js';
+import './js/touchControls.js'; // side-effect only: self-builds the touch UI on a detected touch device, no-ops on desktop
 
 // roomId is write-only in the original code (set here, never read back anywhere) — kept as a
 // plain local rather than shared state, same as it effectively was before.
@@ -262,7 +263,7 @@ function startGameLoopOnce() {
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, state.clock.getDelta());
-  if (state.pointerLocked && state.localAlive) updateMovement(dt);
+  if (state.controlsActive && state.localAlive) updateMovement(dt);
   else setFootstepMode(null); // paused/dead/menu — updateMovement won't run to catch this itself
   if (state.deathAnimActive) updateDeathAnim();
   if (state.sceneReady) updateAudioListener();

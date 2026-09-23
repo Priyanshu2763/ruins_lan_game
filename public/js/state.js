@@ -64,9 +64,23 @@ export const state = {
 
   // ---- input (ui.js's pointerlockchange owns pointerLocked; movement.js's key listeners own
   // the keys Set — both read from movement.js/weapons.js for gating input) ----
-  pointerLocked: false,
+  pointerLocked: false, // real desktop Pointer Lock API state — ONLY meaningful on desktop; touch
+                         // has no equivalent at all, so desktop-only concerns (pause-menu/lockHint
+                         // visibility in ui.js) should keep reading this specifically.
+  controlsActive: false, // unified "the player is actively controlling the game right now" gate,
+                          // for the few call sites BOTH input methods actually share (client.js's
+                          // animate() movement gate, weapons.js's startGrenadeAim() guard). Desktop's
+                          // pointerlockchange handler mirrors pointerLocked into this; touchControls.js
+                          // sets it directly via engageTouchControls()/pauseTouchControls(). Read this,
+                          // not pointerLocked, anywhere the check needs to pass for EITHER input method.
   chatOpen: false, // typing in the chat box: movement/fire/weapon hotkeys must ignore the keyboard
   keys: new Set(),
+  touchLookSensitivity: 1, // touch look-drag multiplier, separate from mouseSensitivity since touch
+                            // deltas are raw CSS pixels, not OS-scaled movementX/Y — different feel,
+                            // Settings tab's own slider (mirrors the existing mouseSensInput pattern)
+  touchCustomizing: false, // true while the touch-control layout edit/drag mode is open — gameplay
+                            // touch handlers (fire/move/look/etc) no-op while this is true so dragging
+                            // a control around doesn't also fire the weapon or walk the player
 
   // ---- match/session (bootstrap's onJoined/onMatchEnded own the writes) ----
   matchEndsAt: null,
