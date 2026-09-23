@@ -258,28 +258,23 @@ function attachAimAndGuns(model, boneNames) {
   // model.scale is never touched), so this is a no-op there.
   const worldScale = model.scale.x;
   const bones = {};
-  for (const n of ['spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
+  for (const n of ['spine_01', 'spine_02', 'spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
   // Real bug found here via live debugging (not just a style nit): matrixWorld on a freshly built/
   // cloned Object3D tree defaults to identity until updateMatrixWorld() actually runs once — so
-  // without this call, every getWorldQuaternion() below (including headBindQ.HeadWorld) would read
-  // garbage identity-derived values instead of the real bind pose, which is exactly what was
-  // happening (confirmed by instrumenting the live dashboard preview: the "corrected" head
-  // quaternion came back as a near-180° rotation, nothing like a small forward-lean fix).
+  // without this call, every getWorldQuaternion() below would read garbage identity-derived values
+  // instead of the real bind pose, which is exactly what was happening (confirmed by instrumenting
+  // the live dashboard preview: an earlier "corrected head" attempt came back as a near-180°
+  // rotation, nothing like a small forward-lean fix).
   model.updateMatrixWorld(true);
-  // Bind-pose (pre-animation) local rotations of the neck/head, captured once here before any clip
-  // ever plays — used to re-level a crouching figure's head (see updateFigure): several stock crouch
-  // clips bake in a pronounced downward tilt at the neck/head specifically (on top of whatever the
-  // torso itself leans), which reads as "looking at the ground" rather than a tactical crouch
-  // scanning forward. Resetting neck+head to their bind rotation each frame removes exactly that
-  // extra tilt while still following the torso's own lean (since world orientation = parent's
-  // CURRENT world orientation × this bind-pose local rotation, not a fully fixed world pose).
-  const headBindQ = { neck_01: bones.neck_01 && bones.neck_01.quaternion.clone(), Head: bones.Head && bones.Head.quaternion.clone(),
-    // WORLD-space bind rotation of the head, captured once here — used to pin a crouching head level
-    // regardless of the torso's own forward lean (a bind-LOCAL reset alone still inherits whatever
-    // the spine/neck are currently doing, so a crouch clip with a real forward torso lean still read
-    // as "looking down" even after that — rendered and compared before/after, this is what actually
-    // fixed it, not just a smaller nudge in the same direction).
-    HeadWorld: bones.Head && bones.Head.getWorldQuaternion(new THREE.Quaternion()) };
+  // Crouch upper-body fix (see updateFigure): user's explicit direction after two failed attempts at
+  // correcting just the head — "dont bend the upper part when crouching just the below half keep the
+  // upper body straight." Captured here, once, before any clip ever plays: the bind-pose LOCAL
+  // rotation of every upper-body joint from the hips up (spine_01/02/03, neck_01, Head) — reset to
+  // these every frame while crouching so the whole upper body (torso, shoulders, neck, head, and by
+  // extension the gun riding the chest) stays in its natural standing orientation; only the legs
+  // (thigh/calf/foot, untouched here) actually do the crouching, dropping the character's height.
+  const upperBodyBindQ = {};
+  for (const n of ['spine_01', 'spine_02', 'spine_03', 'neck_01', 'Head']) upperBodyBindQ[n] = bones[n] && bones[n].quaternion.clone();
 
   // Aim anchor: a group whose ORIENTATION is fixed relative to the character (forward, or along
   // the body when prone) and whose POSITION follows the chest bone (see updateFigure). Parenting
@@ -321,7 +316,7 @@ function attachAimAndGuns(model, boneNames) {
     }
     heldGuns.set(weaponId, inst);
   }
-  return { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, headBindQ };
+  return { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ };
 }
 
 export function buildCharacterFigure(id, name, appearanceIn) {
@@ -368,11 +363,11 @@ export function buildCharacterFigure(id, name, appearanceIn) {
   });
 
   const rig = attachAimAndGuns(model);
-  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, headBindQ } = rig;
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ } = rig;
 
   const mixer = new THREE.AnimationMixer(model);
 
-  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, headBindQ, weaponId: 0, prone: false, crouch: false,
+  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, upperBodyBindQ, weaponId: 0, prone: false, crouch: false,
     charId, bodyMesh, bodyMaterial, eyebrowMaterials, dressMeshes: [], isOperator: false, clipsSource: template.clips };
   dressFigure(fig, appearance);
   return fig;
@@ -411,10 +406,10 @@ function buildOperatorFigure(appearance) {
     if (obj.isSkinnedMesh) { allMeshes.push(obj); obj.frustumCulled = false; if (obj.name === loaded.bodyMesh.name) bodyMesh = obj; }
   });
   const rig = attachAimAndGuns(model, QUAT_TO_MIXAMO);
-  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, headBindQ } = rig;
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ } = rig;
   const mixer = new THREE.AnimationMixer(model);
 
-  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, headBindQ, weaponId: 0, prone: false, crouch: false,
+  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, upperBodyBindQ, weaponId: 0, prone: false, crouch: false,
     charId: opId, bodyMesh, bodyMaterial: null, eyebrowMaterials: [], dressMeshes: allMeshes.filter((m) => m !== bodyMesh),
     isOperator: true, operatorId: opId, garmentMeshNames: loaded.garmentMeshNames, clipsSource: loaded.clips };
   applyStripClothes(fig, appearance);
@@ -484,30 +479,30 @@ function solveArm(fig, side, target, poleDir, handQuat) {
 // Per-frame: advance the animation (legs/torso), then pose both arms around the equipped gun.
 export function updateFigure(fig, dt) {
   fig.mixer.update(dt);
-  // Crouch look-forward fix: several stock crouch clips bake a pronounced extra downward tilt into
-  // the neck/head specifically (found by rendering the pose directly and measuring it — not just a
-  // style choice, it reads as staring at the ground). Resetting neck+head to their BIND-pose LOCAL
-  // rotation removes exactly that extra tilt while still following the torso's own current lean
-  // (world orientation is the parent's CURRENT world rotation × this fixed local one, so a crouched
-  // torso still carries the head down somewhat — just not further hunched by the neck/head joints
-  // on top of that). Scoped to crouch only — walk/idle/sprint were never part of this complaint, and
-  // prone has its own separate straight-body pose (see pickAnimName) that doesn't need this.
+  // Crouch upper-body fix, third attempt this round — both prior attempts corrected the HEAD alone
+  // (first a local-only nudge, then a full world-space level-pin) and both were wrong in different
+  // ways: the local nudge still let the head droop with the torso's own lean (still read as "looking
+  // down"), and the world pin fixed that but forced an anatomically extreme neck counter-rotation
+  // during a deep crouch that collapsed the neck/shoulder GPU skin blend ("the neck sank into the
+  // shoulders" — a real user report on real hardware, not reproduced by this project's own headless/
+  // SwiftShader render tests). User's own direction after both failures: don't try to counter-rotate
+  // the head at all — stop the crouch clip's forward lean from ever reaching the upper body in the
+  // first place, and let only the legs do the crouching.
   //
-  // A prior version of this fix pinned Head to a fixed WORLD orientation (independent of the torso's
-  // own lean) instead of just a local-bind reset, to make the head read as fully level regardless of
-  // how far the torso bent. That was a real mistake, found only by real-GPU user testing (not caught
-  // by this project's own headless/SwiftShader renders, which apparently don't reproduce it clearly):
-  // during a deep crouch the torso leans far enough forward that forcing the head back to level needs
-  // an anatomically extreme counter-rotation at the neck joint — GPU skinning blends bone transforms
-  // per vertex across the neck/shoulder seam, and feeding it two neighboring bones (neck_01, Head)
-  // whose orientations diverge far more than any natural pose would, collapses that blend, reading as
-  // "the neck sank into the shoulders" (reported directly by the user, on real hardware). Reverted to
-  // the plain local-bind reset below — the head still leans down somewhat with the torso (an honest,
-  // anatomically small correction, not a full fix for "look dead level no matter what"), but it can't
-  // produce this class of skin-blend artifact since the delta from the natural pose stays small.
-  if (fig.crouch && !fig.prone && fig.headBindQ) {
-    if (fig.bones.neck_01 && fig.headBindQ.neck_01) fig.bones.neck_01.quaternion.copy(fig.headBindQ.neck_01);
-    if (fig.bones.Head && fig.headBindQ.Head) fig.bones.Head.quaternion.copy(fig.headBindQ.Head);
+  // Every upper-body joint from the hips up (spine_01/02/03, neck_01, Head) is reset to its bind-pose
+  // LOCAL rotation each frame while crouching — the torso, shoulders, neck and head all stay in their
+  // natural standing orientation; the character's height still drops because the LEGS (thigh/calf/
+  // foot, untouched here) are the ones actually bent by the crouch clip. This is a much safer class of
+  // fix than either head-only attempt: every corrected joint is pinned to its own neutral bind value
+  // (never asked to counter-rotate relative to a neighboring bone that's doing something wild), so no
+  // joint's local delta from its neighbor can blow up the way the world-pin's did — there's no
+  // "extreme" rotation being requested anywhere, just "don't move" on five joints. Scoped to crouch
+  // only, same as both prior attempts — walk/idle/sprint were never part of the complaint, and prone
+  // has its own separate straight-body pose (see pickAnimName) that doesn't need this.
+  if (fig.crouch && !fig.prone && fig.upperBodyBindQ) {
+    for (const n of ['spine_01', 'spine_02', 'spine_03', 'neck_01', 'Head']) {
+      if (fig.bones[n] && fig.upperBodyBindQ[n]) fig.bones[n].quaternion.copy(fig.upperBodyBindQ[n]);
+    }
   }
   const grips = GRIPS[fig.weaponId];
   if (!grips || !fig.bones.spine_03) return;
