@@ -2560,3 +2560,60 @@ All three verified on both a Custom body and an Operator (Rico) side by side, an
 regression suite (reconnect, chat, grenade, weapon fire/reload, disconnected-player immunity,
 operator UI/match) re-run clean afterward since this touches the shared figure-build/animate code
 every player goes through. `demo` test account reset back to Custom before finishing.
+
+## Batch 73 (2026-09-23): DONE — the batch 72 crouch fix didn't actually work; found the real bug and
+fixed it for real this time, verified against the live dashboard, not a side harness
+
+User sent fresh screenshots after batch 72 shipped: "wtf is this still looking down what is the
+logic broo they should look forward" — the crouch head-level fix from batch 72 had NOT taken effect
+in the real dashboard Character-tab preview, despite that batch's own claim of having verified it.
+
+**Why batch 72's verification missed this:** it was checked against a custom debug harness driving
+the REMOTE-PLAYER figure pipeline (`createRemote`/`syncRemotePlayer`), which happened to render
+correctly — but the actual complaint was about the dashboard's OWN preview widget (`preview.js`),
+a separate code path building its own standalone figure. Confirmed the bug was real and live by
+reproducing it directly against the real running dashboard in headless Chrome (not the harness):
+screenshot of Custom/Male, Crouch pose, AKM — head still visibly bent down, byte-identical to the
+user's own screenshot. This is the mistake to not repeat: "verified in a debug harness" is not the
+same claim as "verified in the code path the user is actually looking at."
+
+**Root cause, found by instrumenting the LIVE code (a temporary `window.__pvDebug()` export reading
+`figure.crouch`/`headBindQ`/the Head bone's live quaternion), not by re-reading the diff:** two
+separate matrixWorld-staleness bugs stacked on top of each other in `attachAimAndGuns()` /
+`updateFigure()` (characters.js):
+1. `headBindQ.HeadWorld` (the "what does a level, forward-facing head look like in world space"
+   reference, captured once at figure-build time) was read via `bones.Head.getWorldQuaternion(...)`
+   BEFORE `model.updateMatrixWorld(true)` was ever called on the freshly-cloned model — a brand new
+   Object3D tree's `matrixWorld` defaults to identity until that first update runs, so the captured
+   "bind world rotation" was actually garbage (confirmed by dumping it: a wild, physically
+   nonsensical quaternion), not the real bind pose. Fixed by moving `model.updateMatrixWorld(true)`
+   to the top of `attachAimAndGuns()`, before any `getWorldQuaternion()` call.
+2. Even with a correct `HeadWorld` reference, the PER-FRAME correction in `updateFigure()` read
+   `fig.bones.Head.parent.getWorldQuaternion(...)` (i.e. neck_01's current world rotation) right
+   after `fig.mixer.update(dt)` — but `mixer.update()` only writes each animated bone's LOCAL
+   matrix; `matrixWorld` isn't refreshed until the renderer's next `render()` call, which hasn't
+   happened yet this frame. So `neck_01.updateMatrixWorld(true)` (called on just that one bone) was
+   combining ITS freshly-set local matrix with its OWN parent's (the spine chain's) STALE,
+   previous-frame `matrixWorld` — silently wrong by however far the spine moved that frame. Fixed by
+   calling `fig.model.updateMatrixWorld(true)` (top-down from the model root, recursing through the
+   whole live skeleton) immediately before reading `parentWorldQ`, so every world-space read that
+   frame is actually current.
+
+**Verified for real this time:** instrumented the LIVE served code with a temporary debug export,
+confirmed via the actual numbers that the first fix alone still produced a nonsensical corrected
+head orientation, confirmed the second fix was needed and sufficient by cross-checking the resulting
+quaternion math independently in a standalone Node script (`parentWorldQ.invert().multiply(headWorldBind)`
+matched the live-observed result bit for bit) — then, critically, actually looked at a fresh
+screenshot of the real dashboard afterward rather than trusting the numbers alone: Custom/Male
+Crouch, Operator "Rico" Crouch, and Custom Idle/Walk/Run (regression check — those poses don't hit
+this code path and had to stay untouched) all screenshotted and confirmed correct by eye. Debug
+instrumentation fully removed before deploying. Full existing regression suite (`rc.mjs`, `rc3.mjs`,
+`rc10.mjs`, `rc14.mjs`, `dc_immunity.mjs`, `op_ui.mjs`, `op_match.mjs`) re-run clean (all pass, 0
+failures) since this touches shared figure-build/animate code every player goes through. `demo` test
+account's saved appearance reset back to Custom/male afterward (the regression suite leaves it on
+an Operator as a side effect of `op_match.mjs`).
+
+**Lesson for next time, written down explicitly since this is the second time in this session a
+"verified" claim didn't hold up in the real UI:** when a fix targets a specific user-visible surface
+(here: the dashboard Character-tab preview), verify against THAT exact surface, not a stand-in
+pipeline that happens to share code — even when the shared code is the actual thing being changed.

@@ -259,6 +259,13 @@ function attachAimAndGuns(model, boneNames) {
   const worldScale = model.scale.x;
   const bones = {};
   for (const n of ['spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
+  // Real bug found here via live debugging (not just a style nit): matrixWorld on a freshly built/
+  // cloned Object3D tree defaults to identity until updateMatrixWorld() actually runs once — so
+  // without this call, every getWorldQuaternion() below (including headBindQ.HeadWorld) would read
+  // garbage identity-derived values instead of the real bind pose, which is exactly what was
+  // happening (confirmed by instrumenting the live dashboard preview: the "corrected" head
+  // quaternion came back as a near-180° rotation, nothing like a small forward-lean fix).
+  model.updateMatrixWorld(true);
   // Bind-pose (pre-animation) local rotations of the neck/head, captured once here before any clip
   // ever plays — used to re-level a crouching figure's head (see updateFigure): several stock crouch
   // clips bake in a pronounced downward tilt at the neck/head specifically (on top of whatever the
@@ -492,7 +499,15 @@ export function updateFigure(fig, dt) {
     // visibly pitched down with the torso's own forward crouch lean) — pinned to its bind-pose WORLD
     // rotation instead, so it reads as level/forward regardless of how far the torso leans.
     if (fig.bones.Head && fig.headBindQ.HeadWorld && fig.bones.Head.parent) {
-      fig.bones.Head.parent.updateMatrixWorld(true);
+      // Real bug found via live instrumentation: mixer.update() only touches each animated bone's
+      // LOCAL matrix — matrixWorld isn't refreshed until the renderer's next render() pass, which
+      // hasn't happened yet this frame. Calling updateMatrixWorld(true) on just neck_01 (Head's
+      // parent) recomputed ITS OWN matrixWorld from `neck_01.parent.matrixWorld` — but that parent
+      // (the spine chain) was still last frame's STALE matrixWorld, so parentWorldQ below was wrong
+      // by however far the spine moved this frame, producing a wild, unstable head orientation
+      // instead of a small forward-lean correction. Fixed by updating the WHOLE model top-down first
+      // (recurses through every bone, spine included), so every matrixWorld read after this is fresh.
+      fig.model.updateMatrixWorld(true);
       const parentWorldQ = fig.bones.Head.parent.getWorldQuaternion(_q);
       fig.bones.Head.quaternion.copy(parentWorldQ.invert().multiply(fig.headBindQ.HeadWorld));
     }
