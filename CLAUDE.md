@@ -2617,3 +2617,48 @@ an Operator as a side effect of `op_match.mjs`).
 "verified" claim didn't hold up in the real UI:** when a fix targets a specific user-visible surface
 (here: the dashboard Character-tab preview), verify against THAT exact surface, not a stand-in
 pipeline that happens to share code — even when the shared code is the actual thing being changed.
+
+## Batch 74 (2026-09-23): DONE — batch 73's world-pin was ITSELF a real bug (neck-collapse skin
+artifact on real GPU); reverted to a safer local-only correction
+
+User, on real hardware, after batch 73 shipped: "its the same with or without the cap as soon as
+the char sits the face disappears... in match its with the red cap ,and without it also the face
+is looking weird like the neck got inside the shoulders." This happened in BOTH the dashboard
+preview AND real matches — a genuinely different, WORSE symptom than the original "looking down"
+complaint, and not something my own headless-Chrome (SwiftShader software rendering) screenshots
+ever showed across 6 separate fresh-browser test runs, cap and no-cap, before this report.
+
+**Root cause: the batch 73 fix itself was wrong, not just unverified.** It pinned `Head`'s WORLD
+orientation to a fixed "level/forward" target regardless of how far the torso leans. During a deep
+crouch the torso genuinely leans forward a lot — forcing the head back to dead-level against that
+needs an anatomically extreme counter-rotation at the neck joint (confirmed by the earlier debug
+dump: the corrected local quaternion represented over 100° of rotation, nothing like a small
+forward-lean nudge). GPU skinning blends bone transforms per vertex across the neck/shoulder skin-
+weight seam; feeding it two adjacent bones (`neck_01`, `Head`) whose orientations diverge far more
+than any natural animated pose ever would collapses that blend — this reads exactly as "the neck
+sank into the shoulders," matching the user's own words precisely. This is a skinning artifact, not
+a camera/rotation-only issue, which is very plausibly why it didn't show up clearly in my own
+headless renders (software (SwiftShader) vs hardware GPU skinning can legitimately differ in how a
+pathological blend like this resolves) — flagged here explicitly since it's the kind of gap this
+project's testing approach can't currently catch on its own, not something to silently repeat.
+
+**Fix: reverted to the batch-72 "first attempt"** — reset `neck_01` AND `Head` to their BIND-pose
+LOCAL rotations each frame while crouching (no world-space pin at all). This removes the stock
+crouch clip's own extra downward tilt at those two joints specifically (the actual original
+complaint) while still following the torso's own current lean — anatomically small, since it's just
+"hold this joint at its neutral rotation" rather than "force this joint to counteract however far
+its parent has rotated," so it can't produce the extreme divergence that broke the skin blend.
+Honest tradeoff, said plainly: the head will still lean down somewhat with a deep crouch's torso
+lean — this is NOT a full "always dead level" fix, it only removes the clip's own added tilt on top
+of that, which is what batch 72 first tried before escalating to the (now known bad) world-pin.
+
+**Verified, with a real caveat about this session's testing limits stated up front:** rendered the
+result via headless Chrome — front view (clean, natural crouch lean, face fully visible, no visible
+neck/shoulder distortion) and a rotated side view — and re-ran the full existing regression suite
+(`rc.mjs`, `rc3.mjs`, `rc10.mjs`, `rc14.mjs`, `dc_immunity.mjs`, `op_ui.mjs`, `op_match.mjs`, all
+pass, 0 failures). **Not claimed as fully verified this time** — given headless/SwiftShader
+rendering demonstrably missed the real GPU-only skin-collapse bug in batch 73, this fix is presented
+as "reasoned and rendered clean here," and the user was asked directly to confirm on their own
+hardware before this is considered closed, rather than repeating the overconfident "verified" claim
+that caused this exact back-and-forth twice already this session. `demo` test account's appearance
+reset back to Custom/male afterward.

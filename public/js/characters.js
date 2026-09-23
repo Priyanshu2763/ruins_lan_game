@@ -486,31 +486,28 @@ export function updateFigure(fig, dt) {
   fig.mixer.update(dt);
   // Crouch look-forward fix: several stock crouch clips bake a pronounced extra downward tilt into
   // the neck/head specifically (found by rendering the pose directly and measuring it — not just a
-  // style choice, it reads as staring at the ground). Resetting neck+head to their BIND-pose local
+  // style choice, it reads as staring at the ground). Resetting neck+head to their BIND-pose LOCAL
   // rotation removes exactly that extra tilt while still following the torso's own current lean
   // (world orientation is the parent's CURRENT world rotation × this fixed local one, so a crouched
   // torso still carries the head down somewhat — just not further hunched by the neck/head joints
   // on top of that). Scoped to crouch only — walk/idle/sprint were never part of this complaint, and
   // prone has its own separate straight-body pose (see pickAnimName) that doesn't need this.
+  //
+  // A prior version of this fix pinned Head to a fixed WORLD orientation (independent of the torso's
+  // own lean) instead of just a local-bind reset, to make the head read as fully level regardless of
+  // how far the torso bent. That was a real mistake, found only by real-GPU user testing (not caught
+  // by this project's own headless/SwiftShader renders, which apparently don't reproduce it clearly):
+  // during a deep crouch the torso leans far enough forward that forcing the head back to level needs
+  // an anatomically extreme counter-rotation at the neck joint — GPU skinning blends bone transforms
+  // per vertex across the neck/shoulder seam, and feeding it two neighboring bones (neck_01, Head)
+  // whose orientations diverge far more than any natural pose would, collapses that blend, reading as
+  // "the neck sank into the shoulders" (reported directly by the user, on real hardware). Reverted to
+  // the plain local-bind reset below — the head still leans down somewhat with the torso (an honest,
+  // anatomically small correction, not a full fix for "look dead level no matter what"), but it can't
+  // produce this class of skin-blend artifact since the delta from the natural pose stays small.
   if (fig.crouch && !fig.prone && fig.headBindQ) {
     if (fig.bones.neck_01 && fig.headBindQ.neck_01) fig.bones.neck_01.quaternion.copy(fig.headBindQ.neck_01);
-    // Head: not just reset to its BIND-LOCAL rotation (that still inherits whatever the spine/neck
-    // are currently doing, so it wasn't enough on its own — rendered and confirmed the head still
-    // visibly pitched down with the torso's own forward crouch lean) — pinned to its bind-pose WORLD
-    // rotation instead, so it reads as level/forward regardless of how far the torso leans.
-    if (fig.bones.Head && fig.headBindQ.HeadWorld && fig.bones.Head.parent) {
-      // Real bug found via live instrumentation: mixer.update() only touches each animated bone's
-      // LOCAL matrix — matrixWorld isn't refreshed until the renderer's next render() pass, which
-      // hasn't happened yet this frame. Calling updateMatrixWorld(true) on just neck_01 (Head's
-      // parent) recomputed ITS OWN matrixWorld from `neck_01.parent.matrixWorld` — but that parent
-      // (the spine chain) was still last frame's STALE matrixWorld, so parentWorldQ below was wrong
-      // by however far the spine moved this frame, producing a wild, unstable head orientation
-      // instead of a small forward-lean correction. Fixed by updating the WHOLE model top-down first
-      // (recurses through every bone, spine included), so every matrixWorld read after this is fresh.
-      fig.model.updateMatrixWorld(true);
-      const parentWorldQ = fig.bones.Head.parent.getWorldQuaternion(_q);
-      fig.bones.Head.quaternion.copy(parentWorldQ.invert().multiply(fig.headBindQ.HeadWorld));
-    }
+    if (fig.bones.Head && fig.headBindQ.Head) fig.bones.Head.quaternion.copy(fig.headBindQ.Head);
   }
   const grips = GRIPS[fig.weaponId];
   if (!grips || !fig.bones.spine_03) return;
