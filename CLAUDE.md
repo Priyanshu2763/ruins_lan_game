@@ -2355,3 +2355,125 @@ Same controls on the Play and Character tabs (`preview.js`, `.pvBar` CSS). Test:
 (test `rc15`: 5 remote shots → 5 flash sprites). Their casings / slide / pump are still not animated. Dashboard Play
 pane got rotating one-line tips (`TIPS` in ui.js); the tip uses `width:0;min-width:100%` because a long tip
 previously widened the Play card and pushed the character card sideways (caught by the preview test).
+
+## Batch 70 (2026-09-23): DONE — 8 named "Operators" (Mixamo, retargeted), real animation-freeze bug found and fixed
+
+**Assets.** User dropped 8 correctly-exported Mixamo FBX characters (T-pose, FBX Binary — a first
+batch of 7 came out as unusable FBX 6.1 because "FBX 6.1" was picked instead of "FBX Binary" in
+Mixamo's own download dialog; caught by checking the raw file header version bytes before touching
+anything, re-requested and this time verified 7700 across all 8 before proceeding). Renamed onto
+movie/character names by gender+look, checked by actually rendering each one first (not guessed
+from filename): **Frank** (Ch11, stealth suit), **Hanzo** (Ch24, ninja), **Rico** (Ely, armored
+soldier), **Neo** (Remy, casual), **Katniss** (Erika Archer, hooded archer), **Selene** (Eve/Space
+Pirate), **Diana** (Maria, armored warrior), **Furiosa** (Medea, bald sci-fi warrior). 3 of the 12
+originally supplied were excluded and said so plainly rather than silently dropped: a literal demon
+monster, a mocap reference dummy (`passive_marker_man`), and a duplicate of Maria holding a prop.
+A 9th (Peasant Girl, floor-length dress) was proposed then dropped per the user's own call.
+
+**Why this was real engineering, not a data add:** these use Mixamo's own skeleton (`mixamorig`-
+prefixed bone names) — a totally different rig from the Quaternius "Custom" bodies, with genuinely
+different local bind-rotation conventions per bone (measured directly: Quaternius's `upperarm_r`
+sits ~90° from identity in its own local frame, mixamorig's `RightArm` sits near identity) — so our
+existing Idle/Walk/Sprint/Crouch animation library couldn't just be renamed onto it.
+
+- **`public/js/retarget.js`**: bind-pose-delta retargeting (the standard, convention-independent
+  technique) — measures each bone's WORLD-space rotation delta from its own bind pose on the source
+  (Quaternius) rig at each sampled frame, applies that same world delta to the target bone's own
+  bind pose, converts back to target-local via the target's own (freshly recomputed, parent-first)
+  hierarchy. `QUAT_TO_MIXAMO`: a complete 65-bone map (every Quaternius bone incl. all finger
+  segments, both are UE-mannequin-derived so this is a real 1:1, not an approximation) built from
+  directly inspecting both live skeletons in a browser, not guessed. **A real, serious bug caught
+  only by direct verification, not visual spot-checking**: the internal scrub mixer had
+  `action.paused = true` (meant defensively, to stop it "auto-advancing" — except nothing else ever
+  drove this private mixer, so there was nothing to guard against) — three.js forces an action's own
+  deltaTime to 0 whenever `paused` is true, and `mixer.setTime()` routes through that same per-action
+  update, so the scrub never actually moved past the first frame: EVERY retargeted clip for EVERY
+  operator was silently baking one static pose repeated for the whole duration. This looked correct
+  in an early render (a single frame of Walk_Loop happens to look like a natural mid-stride pose,
+  and different CLIPS produce different frozen poses, which together read as "a walk cycle" at a
+  glance) — only caught by directly sampling the SAME clip's own baked bone quaternions at several
+  different `t`s and finding them byte-identical. Fixed by removing the pause; re-verified the same
+  way (now genuinely different per-frame values) and by rendering two timestamps of one Walk_Loop
+  side by side (visibly different leg positions).
+- **`public/js/operators.js`**: the 8-entry roster (id/label/gender, data lives in
+  `shared/appearance.js` so the server's sanitizer sees the same catalog); `mergeSkeletons()` fixes
+  a real quirk in these files — each skinned mesh arrived with its OWN duplicate full copy of the
+  skeleton (confirmed by traversing the raw scene graph and finding e.g. 3 separate top-level
+  `mixamorigHips` root bones) rather than sharing one, which would leave every mesh but the one the
+  mixer happened to bind to frozen in bind pose, plus leaves duplicate-named bones a later
+  `getObjectByName` could grab by mistake — remapped via the same skinIndex-by-bone-name technique
+  already used for hair in `dress.js`, then the orphaned duplicate chains are actually removed from
+  the tree, not just left unused. Height-normalized to the same 1.82 units as the Quaternius bodies
+  (measured bounding box, same fit-to-target pattern as the guns/grenade — these FBX arrive in real
+  centimeters, confirmed once rather than assumed twice). Operators load lazily per-id (~5-60MB
+  each, ~195MB for all 8 — not worth eager-loading for players who never open Operators mode; fine
+  over LAN, this project's actual deployment).
+- **`characters.js` integration**: `buildCharacterFigure` branches on `appearance.mode` and returns
+  the SAME `fig` shape either way (`bones{spine_03,upperarm_r,...}` populated via the retarget map's
+  keys instead of literal names) — every downstream consumer (arm IK, first-person rig, remote
+  animation, gun attachment) needed zero changes beyond that, the same way it already didn't care
+  about male vs female. `attachAimAndGuns()` factored out of the original inline block for reuse by
+  both body types — **caught and fixed a self-inflicted bug from that refactor**: the extracted
+  helper's function body was composed but never actually spliced back into the file, so
+  `buildOperatorFigure` immediately threw `attachAimAndGuns is not defined` the first time it ran
+  live (caught by the browser test, not the syntax checker — a `node --check` can't catch a missing
+  top-level declaration that's only ever referenced, never assigned wrong). Two more real bugs found
+  only by testing the actual first-person path specifically (not just the dashboard preview): (1)
+  `armsOnlyGeometry`'s Quaternius-only bone-name regex matched nothing on a mixamorig skeleton,
+  silently producing zero triangles and invisible first-person arms for every operator — fixed with
+  a second regex (`mixamorig(Left|Right)(Shoulder|Arm|ForeArm|Hand)`, prefix-matches finger bones
+  for free the same way the Quaternius one does); (2) that same function assumed `geometry.index`
+  always exists (true for the Quaternius glTF bodies, not true for some of these FBX meshes,
+  non-indexed) — crashed for every single-mesh operator specifically, caught via a standalone rig
+  dump script after noticing the in-game first-person view still showed plain default skin instead
+  of the saved operator. (3) `setViewmodelAppearance`'s "did the body change, do I need to rebuild
+  instead of just re-dress" check only compared `character` (male/female) — which stays `'male'`
+  even in operator mode (present but unused) — so switching into Operators (or between two
+  different Operators) never tripped a rebuild, silently leaving whatever body was already built and
+  just re-dressing it with the new appearance's fields. This is exactly why (2) above was findable
+  at all: fixing the crash alone wasn't enough, the stale-figure bug meant the fixed code path
+  wasn't even being reached. Fixed with the same `mode`/`operator`-aware check already used in
+  `preview.js`'s equivalent function (should have been applied there too the first time; wasn't).
+  `redressFirstPersonRig`/`redressFigure` branch the same way to call the operator's `stripClothes`
+  toggle instead of the Quaternius-only `dressFigure`. `getFigureAnimationClip(fig, name)` added
+  since operator clips live on that operator's own retargeted set, not the shared Quaternius
+  `template.clips` (`setRemoteAnim`/`preview.js` updated to read from `fig.clipsSource`).
+  `createRemote`'s retry-when-not-ready path generalized from "template not loaded" to "figure came
+  back null for any reason" (an operator not finished loading is the new case), with a new
+  `retryPendingCreates()` also called after each operator's own load finishes, not just the shared
+  template's.
+
+**Strip-clothes toggle** (the "future closet support" ask): real per-mesh visibility, not a stub —
+works for the 2 operators whose outfit is genuinely separate geometry (Neo: Body/Tops/Bottoms/Shoes/
+Hair as distinct meshes; Katniss: a distinct Clothes mesh) found by inspecting each FBX's own mesh
+list, not assumed uniform. The other 6 are one fused body+clothes mesh with nothing to hide — the
+toggle is visibly disabled with an explanatory note there rather than silently doing nothing.
+Where it does work, stripping reveals the underlying body mesh is NOT a complete nude figure (real,
+visible gaps/incomplete coverage) — an honest limitation of the source asset, said plainly rather
+than hidden; a real per-operator wardrobe is future work.
+
+**UI**: Character tab gets a Custom/Operators switch (`shared/appearance.js`'s `MODES`), an operator
+grid grouped by gender, and the strip-clothes toggle with its disabled-state explanation.
+`preview.js`'s own body-change detection got the same `mode`/`operator`-aware fix as viewmodel.js's
+(caught by the same class of bug, fixed the same way, before it ever reached the live game).
+
+**Verified, in order, each with real evidence not assumption**: retargeted bind pose + walk/sprint/
+crouch poses rendered directly (natural stance, correct stride/lean/crouch, no broken joints) before
+touching characters.js at all; the actual frozen-clip bug found by sampling baked quaternions at
+multiple times and only trusting a render after they differed; full dashboard round trip in headless
+Chrome (mode switch, 8-name grid, live preview per pick, toggle enabled/disabled correctly per
+operator) — caught the `attachAimAndGuns` splice bug here; saved an operator, joined a real match,
+found the stale-figure bug by comparing the LIVE first-person rig's actual mesh/material against
+what should have been loaded (not by eyeballing a screenshot alone, though the screenshot before and
+after the fix is the clearest evidence: plain default arms holding the AKM before, Rico's dark
+armored gauntlet after); a second client's own scene independently confirmed the correct mesh name
+(`Maria_J_J_Ong`/`maria_M1`) for a saved Diana, not just the appearance JSON round-tripping over the
+network; the full pre-existing regression suite (reconnect, chat, grenade sound/blast, weapon fire/
+reload, disconnected-player immunity, dashboard preview drag/spin) re-run clean afterward to confirm
+none of this broke anything unrelated. `demo` test account's saved appearance reset back to Custom
+before finishing, so it isn't left in a test state for the user's own next look.
+
+**Not done / said plainly**: no closet editing for Operators beyond the one strip-clothes toggle;
+their own bundled facial/eye materials aren't tinted or adjustable; remote OTHER players' Operator
+figures don't get any live redress either (matches the existing Custom-body behavior — appearance is
+fixed for the whole match once broadcast, by original design, not something this batch changed).

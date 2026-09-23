@@ -5,7 +5,7 @@ import { cancelGrenadeAim } from './weapons.js';
 import { setMasterVolume, setMusicVolume, setSfxVolume } from './audio.js';
 import { setFov } from './world.js';
 import { mountPreviewInto, resizePreview, setPreviewAppearance, startPreviewLoop, stopPreviewLoop } from './preview.js';
-import { CHARACTERS, SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, SLOTS, sanitizeAppearance } from '/shared/appearance.js';
+import { CHARACTERS, SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, SLOTS, MODES, OPERATORS, CAN_STRIP_CLOTHES, sanitizeAppearance } from '/shared/appearance.js';
 
 // ---------- DOM ----------
 const authScreen = document.getElementById('authScreen');
@@ -308,6 +308,12 @@ function renderCloset() {
   const a = draftAppearance;
   closetEl.innerHTML = '';
 
+  const modeSec = section('Look');
+  modeSec.appendChild(chipRow(MODES, a.mode, (id) => patchDraft({ mode: id })));
+  closetEl.appendChild(modeSec);
+
+  if (a.mode === 'operator') { renderOperatorPicker(a); return; }
+
   const body = section('Body');
   body.appendChild(chipRow(CHARACTERS, a.character, (id) => patchDraft({ character: id })));
   closetEl.appendChild(body);
@@ -334,6 +340,37 @@ function renderCloset() {
     if (cf && a[slot] !== 'none') sec.appendChild(swatchRow(SLOT_PALETTE[slot], a[cf], (c) => patchDraft({ [cf]: c })));
     closetEl.appendChild(sec);
   }
+}
+
+// Operators mode: pick one of the 8 predefined named characters (own art/outfit, not closet-
+// editable piece by piece — see shared/appearance.js) instead of the Custom body above. Grouped by
+// gender purely for readability in a picker, same information CHARACTERS already carries per body.
+function renderOperatorPicker(a) {
+  const male = section('Male operators');
+  male.appendChild(chipRow(OPERATORS.filter((o) => o.gender === 'male'), a.operator, (id) => patchDraft({ operator: id })));
+  closetEl.appendChild(male);
+
+  const female = section('Female operators');
+  female.appendChild(chipRow(OPERATORS.filter((o) => o.gender === 'female'), a.operator, (id) => patchDraft({ operator: id })));
+  closetEl.appendChild(female);
+
+  const outfit = section('Outfit');
+  const canStrip = CAN_STRIP_CLOTHES.has(a.operator);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'memeToggle ' + (a.stripClothes ? 'on' : 'off');
+  btn.textContent = a.stripClothes ? 'CLOTHES OFF' : 'ORIGINAL OUTFIT';
+  btn.disabled = !canStrip;
+  btn.title = canStrip ? "Hide this operator's outfit" : "This operator's outfit isn't separate from their body yet — can't be removed";
+  btn.addEventListener('click', () => patchDraft({ stripClothes: !a.stripClothes }));
+  outfit.appendChild(btn);
+  if (!canStrip) {
+    const hint = document.createElement('p');
+    hint.className = 'sub'; hint.style.marginTop = '8px';
+    hint.textContent = "This operator's clothes are modeled as one piece with their body, so they can't be stripped yet — a real closet for Operators is planned.";
+    outfit.appendChild(hint);
+  }
+  closetEl.appendChild(outfit);
 }
 
 resetCharacterBtn.addEventListener('click', () => setDraft(myAppearance));

@@ -6,6 +6,8 @@ import { state } from './state.js';
 import { setupDressAssets, dressFigure, BODY_MATERIAL } from './dress.js';
 import { guestAppearance, sanitizeAppearance } from '/shared/appearance.js';
 import { playPositionalLoopStart, dryPositionFor, applyOcclusionParams, isOccludedBetween, localListenerPos } from './audio.js';
+import { QUAT_TO_MIXAMO } from './retarget.js';
+import { isOperatorId, canStripClothes, loadOperator, getLoadedOperator } from './operators.js';
 
 // Real assets (Quaternius, CC0 — see CLAUDE.md for the batch that added these) replacing the
 // old stacked-BoxGeometry figure: a rigged/animated humanoid + a shared animation library +
@@ -225,6 +227,9 @@ export function onCharacterTemplateReady(fn) { onceReady(fn); }
 // Exposed so the dashboard preview widget (preview.js) can play a named clip on its own
 // standalone figure — same clip library every in-game remote figure draws from.
 export function getCharacterAnimationClip(name) { return template ? template.clips.get(name) || null : null; }
+// Same lookup, but from a specific FIGURE's own clip source — needed for operator figures, whose
+// retargeted clips live on that operator's own template, not the shared Quaternius one.
+export function getFigureAnimationClip(fig, name) { return fig && fig.clipsSource ? fig.clipsSource.get(name) || null : null; }
 
 // Builds one player's figure by cloning the shared template — SkeletonUtils' `clone` (not a
 // plain Object3D.clone) is required for a skinned/rigged mesh, since a naive clone leaves the
@@ -232,38 +237,14 @@ export function getCharacterAnimationClip(name) { return template ? template.cli
 // together. Exported so the dashboard's Play/Character preview widget (preview.js) can build
 // the exact same figure a real remote player uses. Returns null if the template hasn't finished
 // loading yet — callers (createRemote below, preview.js) handle that via onCharacterTemplateReady.
-export function buildCharacterFigure(id, name, appearanceIn) {
-  if (!template) return null;
-  const appearance = appearanceIn ? sanitizeAppearance(appearanceIn) : guestAppearance(id);
-  const charId = appearance.character;
-  const model = cloneSkinned(template.scenes[charId]);
-  // The model faces +Z; this game's forward is -Z (movement.js, the old figure's gun offset), so
-  // the yaw applied to the outer group would otherwise turn every remote player to face backwards.
-  model.rotation.y = Math.PI;
-  const root = new THREE.Group();
-  root.add(model);
-
-  let bodyMesh = null, bodyMaterial = null;
-  const eyebrowMaterials = [];
-  model.traverse((obj) => {
-    if (obj.isMesh && obj.material) {
-      if (obj.material.name === BODY_MATERIAL[charId]) {
-        obj.material = obj.material.clone(); // per-instance, so tinting one player never affects another
-        bodyMaterial = obj.material; bodyMesh = obj;
-      } else if (obj.material.name.startsWith('MI_Hair')) {
-        obj.material = obj.material.clone();
-        eyebrowMaterials.push(obj.material);
-      }
-    }
-    // Bounding info on a skinned mesh is computed from the BIND pose — once real animation moves
-    // the skeleton away from that pose, the stale bounds can clip a fully on-screen figure out
-    // of view. Cheap to just never frustum-cull these (a handful of low-poly figures, not
-    // thousands), same tradeoff every other moving character in this engine already makes.
-    if (obj.isSkinnedMesh) obj.frustumCulled = false;
-  });
-
+// Builds the aim-anchor + attaches all 4 held-gun instances — shared by both body types (Quaternius
+// "Custom" and the operator/Mixamo bodies), since neither piece cares which skeleton it's sitting on
+// beyond the bone OBJECTS it's handed. `boneNames`, if given, maps this function's internal logical
+// keys (spine_03, upperarm_r, ...) to the real bone names to look up on `model` — omitted for the
+// Quaternius bodies, whose real names already match those keys directly.
+function attachAimAndGuns(model, boneNames) {
   const bones = {};
-  for (const n of ['spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l']) bones[n] = model.getObjectByName(n);
+  for (const n of ['spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
 
   // Aim anchor: a group whose ORIENTATION is fixed relative to the character (forward, or along
   // the body when prone) and whose POSITION follows the chest bone (see updateFigure). Parenting
@@ -304,16 +285,105 @@ export function buildCharacterFigure(id, name, appearanceIn) {
     }
     heldGuns.set(weaponId, inst);
   }
+  return { bones, aim, aimStand, aimProne, spineBindQ, heldGuns };
+}
+
+export function buildCharacterFigure(id, name, appearanceIn) {
+  const appearance = appearanceIn ? sanitizeAppearance(appearanceIn) : guestAppearance(id);
+  if (appearance.mode === 'operator') return buildOperatorFigure(appearance);
+  if (!template) return null;
+  const charId = appearance.character;
+  const model = cloneSkinned(template.scenes[charId]);
+  // The model faces +Z; this game's forward is -Z (movement.js, the old figure's gun offset), so
+  // the yaw applied to the outer group would otherwise turn every remote player to face backwards.
+  model.rotation.y = Math.PI;
+  const root = new THREE.Group();
+  root.add(model);
+
+  let bodyMesh = null, bodyMaterial = null;
+  const eyebrowMaterials = [];
+  model.traverse((obj) => {
+    if (obj.isMesh && obj.material) {
+      if (obj.material.name === BODY_MATERIAL[charId]) {
+        obj.material = obj.material.clone(); // per-instance, so tinting one player never affects another
+        bodyMaterial = obj.material; bodyMesh = obj;
+      } else if (obj.material.name.startsWith('MI_Hair')) {
+        obj.material = obj.material.clone();
+        eyebrowMaterials.push(obj.material);
+      }
+    }
+    // Bounding info on a skinned mesh is computed from the BIND pose — once real animation moves
+    // the skeleton away from that pose, the stale bounds can clip a fully on-screen figure out
+    // of view. Cheap to just never frustum-cull these (a handful of low-poly figures, not
+    // thousands), same tradeoff every other moving character in this engine already makes.
+    if (obj.isSkinnedMesh) obj.frustumCulled = false;
+  });
+
+  const rig = attachAimAndGuns(model);
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns } = rig;
 
   const mixer = new THREE.AnimationMixer(model);
 
   const fig = { root, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, weaponId: 0, prone: false,
-    charId, bodyMesh, bodyMaterial, eyebrowMaterials, dressMeshes: [] };
+    charId, bodyMesh, bodyMaterial, eyebrowMaterials, dressMeshes: [], isOperator: false, clipsSource: template.clips };
   dressFigure(fig, appearance);
   return fig;
 }
 
-export function redressFigure(fig, appearance) { dressFigure(fig, appearance); }
+// Builds a figure from one of the 8 predefined named "Operators" (operators.js) instead of the
+// Quaternius closet bodies — a totally different asset (own skeleton, "mixamorig"-prefixed bone
+// names, retargeted onto our animation library rather than sharing it directly, see retarget.js).
+// Returns the SAME `fig` shape buildCharacterFigure produces for a Custom body — same `bones` keys
+// (populated via QUAT_TO_MIXAMO instead of by literal name), same aim/heldGuns/mixer wiring (built
+// by the exact shared attachAimAndGuns() helper) — so every piece of code downstream of this
+// (updateFigure/poseArms/solveArm/restrictToArms, the first-person rig, remote-figure animation)
+// works on an operator figure with zero changes, the same way it already didn't care which of the
+// two Quaternius bodies (male/female) it was handed.
+function buildOperatorFigure(appearance) {
+  const opId = appearance.operator;
+  const loaded = getLoadedOperator(opId);
+  if (!loaded) {
+    // Not loaded yet: kick off the (lazy, per-id — these are ~5-60MB each, not worth eager-loading
+    // all 8 for players who never touch Operators mode) load in the background and let the caller
+    // retry, same "return null, try again next tick" contract buildCharacterFigure already has
+    // while the Quaternius template itself is still loading.
+    if (template) loadOperator(opId, () => cloneSkinned(template.scenes.male), template.clips).then(retryPendingCreates);
+    return null;
+  }
+  const model = cloneSkinned(loaded.model);
+  model.rotation.y = Math.PI; // same "+Z model-forward vs -Z game-forward" correction as the Quaternius bodies
+  const root = new THREE.Group();
+  root.add(model);
+
+  let bodyMesh = null;
+  const allMeshes = [];
+  model.traverse((obj) => {
+    if (obj.isSkinnedMesh) { allMeshes.push(obj); obj.frustumCulled = false; if (obj.name === loaded.bodyMesh.name) bodyMesh = obj; }
+  });
+  const rig = attachAimAndGuns(model, QUAT_TO_MIXAMO);
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns } = rig;
+  const mixer = new THREE.AnimationMixer(model);
+
+  const fig = { root, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, weaponId: 0, prone: false,
+    charId: opId, bodyMesh, bodyMaterial: null, eyebrowMaterials: [], dressMeshes: allMeshes.filter((m) => m !== bodyMesh),
+    isOperator: true, operatorId: opId, garmentMeshNames: loaded.garmentMeshNames, clipsSource: loaded.clips };
+  applyStripClothes(fig, appearance);
+  return fig;
+}
+// The strip-clothes toggle: hides just the garment mesh(es) this specific operator actually has as
+// separate pieces (canStripClothes/GARMENT_MESHES in operators.js) — a no-op for every other
+// operator, whose clothes are fused into one body mesh with nothing to hide (flagged in the UI
+// rather than silently pretending this works everywhere).
+function applyStripClothes(fig, appearance) {
+  if (!fig.isOperator) return;
+  const hide = !!appearance.stripClothes;
+  for (const m of fig.dressMeshes) if (fig.garmentMeshNames.includes(m.name)) m.visible = !hide;
+}
+
+export function redressFigure(fig, appearance) {
+  if (fig.isOperator) applyStripClothes(fig, sanitizeAppearance(appearance));
+  else dressFigure(fig, appearance);
+}
 
 export function setFigureWeapon(fig, weaponId) {
   fig.weaponId = weaponId;
@@ -417,18 +487,27 @@ function toWorldParent(fig, v) { return v.clone().applyMatrix4(fig.root.matrixWo
 // the camera, and posed by the exact same two-arm IK the world figures use — the gun is simply moved
 // around in camera space (viewmodel.js does the sway / recoil / reload motion) and the arms follow it.
 const FP_ARM_BONE = /^(upperarm|lowerarm|hand|thumb|index|middle|ring|pinky)_/;
+// Same idea for operator (mixamorig) skeletons — a completely different naming scheme, so the
+// Quaternius regex above matches nothing on them (which would leave a first-person operator's
+// arms entirely invisible — every triangle gets excluded — rather than merely mis-cut). Prefix
+// matching on 'Hand' alone already covers every finger sub-bone too (mixamorigLeftHandThumb1 etc
+// literally starts with mixamorigLeftHand), same as the Quaternius pattern covering thumb_01_l etc.
+const FP_ARM_BONE_MIXAMO = /^mixamorig(Left|Right)(Shoulder|Arm|ForeArm|Hand)/;
 const FP_SHOULDER_MID = new THREE.Vector3(0, -0.29, -0.10); // where the shoulder line sits, in camera space
 const FP_BASE_Q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI / 2, 0)); // gun +X (barrel) -> camera -Z, sights up
 const armGeoCache = new WeakMap();
 // A copy of a skinned mesh's geometry keeping only the triangles that sit on the arm/hand bones.
-function armsOnlyGeometry(orig, skeleton) {
+function armsOnlyGeometry(orig, skeleton, armRegex) {
   const cached = armGeoCache.get(orig);
   if (cached) return cached;
-  const isArm = skeleton.bones.map((b) => FP_ARM_BONE.test(b.name));
+  const isArm = skeleton.bones.map((b) => armRegex.test(b.name));
   const si = orig.attributes.skinIndex, sw = orig.attributes.skinWeight, n = si.count;
   const arm = new Float32Array(n);
   for (let i = 0; i < n; i++) for (let k = 0; k < 4; k++) if (isArm[si.getComponent(i, k)]) arm[i] += sw.getComponent(i, k);
-  const src = orig.index.array, keep = [];
+  // Some operator FBX meshes arrive non-indexed (no shared vertices between triangles), unlike the
+  // Quaternius glTF bodies which always have an index buffer — fall back to a synthetic 0..n-1
+  // index (one "triangle" per 3 consecutive vertices) so this works on either.
+  const src = orig.index ? orig.index.array : Array.from({ length: n }, (_, i) => i), keep = [];
   for (let t = 0; t < src.length; t += 3) if (arm[src[t]] >= 0.5 && arm[src[t + 1]] >= 0.5 && arm[src[t + 2]] >= 0.5) keep.push(src[t], src[t + 1], src[t + 2]);
   const g = new THREE.BufferGeometry();
   for (const name of Object.keys(orig.attributes)) g.setAttribute(name, orig.attributes[name]);
@@ -438,10 +517,11 @@ function armsOnlyGeometry(orig, skeleton) {
 }
 function restrictToArms(fig) {
   const skeleton = fig.bodyMesh.skeleton;
+  const armRegex = fig.isOperator ? FP_ARM_BONE_MIXAMO : FP_ARM_BONE;
   const keepMeshes = new Set([fig.bodyMesh, ...fig.dressMeshes]);
   for (const mesh of keepMeshes) {
     mesh.userData.origGeometry ||= mesh.geometry;
-    mesh.geometry = armsOnlyGeometry(mesh.userData.origGeometry, skeleton);
+    mesh.geometry = armsOnlyGeometry(mesh.userData.origGeometry, skeleton, armRegex);
     mesh.visible = mesh.geometry.index.count > 0; // hair / hats / trousers have no arm triangles at all
   }
   const guns = [...fig.heldGuns.values()];
@@ -454,7 +534,7 @@ export function buildFirstPersonRig(appearance) {
   fig.fp = true;
   fig.root.add(fig.aim); // anchor lives in camera space, not on the model
   restrictToArms(fig);
-  const idle = template.clips.get('Idle_Loop');
+  const idle = fig.clipsSource.get('Idle_Loop');
   if (idle) fig.mixer.clipAction(idle).play();
   fig.mixer.update(0); // evaluates the rest pose (curled fingers) ONCE; the IK only ever rewrites these six bones,
   // so each frame just restores their local rotations (see updateFirstPersonRig) instead of re-evaluating the animation.
@@ -536,7 +616,12 @@ export function cloneGunPartWorld(fig, weaponId, name) {
 }
 // Recolours / re-dresses the rig after the closet changes (the restriction has to be redone since
 // dressFigure rebuilds the cloth meshes).
-export function redressFirstPersonRig(fig, appearance) { dressFigure(fig, appearance); restrictToArms(fig); fig.fpSig = null; }
+export function redressFirstPersonRig(fig, appearance) {
+  if (fig.isOperator) applyStripClothes(fig, sanitizeAppearance(appearance));
+  else dressFigure(fig, appearance);
+  restrictToArms(fig);
+  fig.fpSig = null;
+}
 // Where the muzzle sits along the gun, in the gun's own space (barrel = +X from the grip point).
 export function getMuzzleAlongBarrel(weaponId) { const f = GUN_FIT[weaponId]; return f ? f.length * (1 - f.grip) : 0; }
 
@@ -563,8 +648,11 @@ const appearances = new Map();
 export function setRemoteAppearance(id, appearance) { if (appearance) appearances.set(id, sanitizeAppearance(appearance)); }
 export function createRemote(id, name, pos) {
   if (remotePlayers.has(id)) return;
-  if (!template) { if (!pendingCreates.some((a) => a[0] === id)) pendingCreates.push([id, name, pos]); return; }
+  // Null covers two different "not ready yet" cases with one retry path: the Quaternius template
+  // itself still loading (as before), or — new — an Operator body that hasn't finished its own
+  // (lazy, per-id) load yet even though the template is long ready.
   const fig = buildCharacterFigure(id, name, appearances.get(id));
+  if (!fig) { if (!pendingCreates.some((a) => a[0] === id)) pendingCreates.push([id, name, pos]); return; }
   fig.root.position.set(pos[0], pos[1] || 0, pos[2]);
   state.scene.add(fig.root);
   remotePlayers.set(id, {
@@ -575,7 +663,8 @@ export function createRemote(id, name, pos) {
     currentAction: null, currentAnimName: null,
   });
 }
-onceReady(() => { for (const args of pendingCreates.splice(0)) createRemote(...args); });
+export function retryPendingCreates() { for (const args of pendingCreates.splice(0)) createRemote(...args); }
+onceReady(retryPendingCreates);
 
 export function removeRemote(id) {
   const rp = remotePlayers.get(id);
@@ -649,8 +738,8 @@ function pickAnimName(rp) {
 }
 
 function setRemoteAnim(rp, name) {
-  if (!template || rp.currentAnimName === name) return;
-  const clip = template.clips.get(name);
+  if (rp.currentAnimName === name) return;
+  const clip = rp.fig.clipsSource.get(name);
   if (!clip) return;
   const action = rp.mixer.clipAction(clip);
   action.reset().fadeIn(ANIM_FADE_SEC).play();

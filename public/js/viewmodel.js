@@ -95,9 +95,18 @@ function mountGrenadeProp() {
 }
 // Called with the player's saved look (skin/sleeves/gloves show on the arms). Same body -> just re-dress.
 export function setViewmodelAppearance(app) {
-  const bodyChanged = appearance && app && appearance.character !== app.character;
+  // Same identity check as preview.js's setPreviewAppearance — `character` alone stops being a
+  // reliable "did the body change" signal once Operators exist: it stays 'male' even in operator
+  // mode (unused there, but still present so sanitizeAppearance always returns a full object), so
+  // a real switch INTO Operators (or between two different Operators) never tripped this before,
+  // silently leaving the previous body's rig in place and just re-dressing it with the wrong
+  // appearance's fields (the actual root cause behind a saved Operator not showing correctly in
+  // first person the first time this was tested live — found by comparing the LIVE rig's own
+  // debug dump against the appearance that was supposed to be applied, not guessed at).
+  const prev = appearance;
+  const modelChanged = !prev || prev.mode !== app.mode || (app.mode === 'custom' ? prev.character !== app.character : prev.operator !== app.operator);
   appearance = app;
-  if (!rig || bodyChanged) { rebuild(); return; }
+  if (!rig || modelChanged) { rebuild(); return; }
   redressFirstPersonRig(rig, app);
 }
 export function getMuzzleFlashTexture() { return muzzleFlash.material.map; }

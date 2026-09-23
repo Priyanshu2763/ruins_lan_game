@@ -5,7 +5,7 @@
 // element itself is reparented into whichever pane is currently active (mountPreviewInto), which
 // keeps a single WebGL context and a single render loop instead of juggling two.
 import * as THREE from 'three';
-import { buildCharacterFigure, onCharacterTemplateReady, getCharacterAnimationClip, setFigureWeapon, updateFigure, redressFigure } from './characters.js';
+import { buildCharacterFigure, onCharacterTemplateReady, getFigureAnimationClip, setFigureWeapon, updateFigure, redressFigure } from './characters.js';
 
 let scene, camera, renderer, canvas, figure, currentAction = null;
 let figureReadyQueued = false;
@@ -56,7 +56,12 @@ function ensureScene() {
 function buildFigure() {
   if (figure) { scene.remove(figure.root); figure = null; }
   const fig = buildCharacterFigure(0, 'You', currentAppearance);
-  if (!fig) return; // shouldn't happen post-ready, but never throw into a render loop over it
+  if (!fig) {
+    // An Operator body (unlike the Quaternius template) loads lazily per-id, so this can genuinely
+    // still be null right after picking one — poll briefly rather than leaving the card empty.
+    setTimeout(() => { if (!figure) buildFigure(); }, 250);
+    return;
+  }
   setFigureWeapon(fig, previewWeapon);
   scene.add(fig.root);
   figure = fig;
@@ -87,16 +92,21 @@ export function resizePreview() {
 // Live closet preview: swapping BODY (male/female) needs a different rig, so that rebuilds the
 // figure; everything else (skin, hair, clothes, colors) just redresses the existing one.
 export function setPreviewAppearance(app) {
-  const bodyChanged = currentAppearance && currentAppearance.character !== app.character;
+  // A rebuild (not just a redress) is needed whenever the underlying MODEL changes: Custom's own
+  // male/female swap (as before), switching between Custom and Operators, or picking a different
+  // Operator — each of those is a genuinely different mesh/skeleton, not a re-tintable variant of
+  // the current one.
+  const prev = currentAppearance;
+  const modelChanged = prev && (prev.mode !== app.mode || (prev.mode === 'custom' ? prev.character !== app.character : prev.operator !== app.operator));
   currentAppearance = app;
-  if (!figure || bodyChanged) { if (scene && figureReadyQueued) buildFigure(); return; }
+  if (!figure || modelChanged) { if (scene && figureReadyQueued) buildFigure(); return; }
   redressFigure(figure, app);
 }
 
 // Crossfades the figure to the selected animation clip.
 function applyPose(fade = true) {
   if (!figure) return;
-  const clip = getCharacterAnimationClip(previewPose);
+  const clip = getFigureAnimationClip(figure, previewPose);
   if (!clip) return;
   const next = figure.mixer.clipAction(clip);
   if (currentAction === next) return;
@@ -187,7 +197,10 @@ function savePicture() {
   a.click();
 }
 
+let __frameCount = 0;
+window.__pvDebug = () => ({ frameCount: __frameCount, rafId, hasFigure: !!figure, dragging, yaw, yawVel, camH });
 function tick(t) {
+  __frameCount++;
   rafId = requestAnimationFrame(tick);
   const dt = lastT ? Math.min(0.05, (t - lastT) / 1000) : 0;
   lastT = t;
@@ -199,10 +212,10 @@ function tick(t) {
   camera.position.set(0, camH, zoom);
   camera.lookAt(0, CAM_TARGET_Y, 0);
   if (figure) {
-    updateFigure(figure, dt);
+    try { updateFigure(figure, dt); } catch (e) { window.__lastPvError = e.message + '\n' + e.stack; console.error('PREVIEW updateFigure crash:', e.message, e.stack); }
     figure.root.rotation.y = yaw;
   }
-  if (renderer && canvas.parentElement) renderer.render(scene, camera);
+  if (renderer && canvas.parentElement) { try { renderer.render(scene, camera); } catch (e) { window.__lastPvError = 'RENDER: ' + e.message + '\n' + e.stack; console.error('PREVIEW render crash:', e.message, e.stack); } }
 }
 
 export function startPreviewLoop() {

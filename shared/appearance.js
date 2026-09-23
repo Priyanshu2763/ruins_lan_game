@@ -8,6 +8,33 @@ export const CHARACTERS = [
   { id: 'female', label: 'Female' },
 ];
 
+// The two top-level appearance modes: a fully custom closet-built look (the Quaternius bodies
+// above), or one of the predefined named "Operators" — real distinct characters (different asset
+// pack entirely, own skeleton — see public/js/operators.js) each with their own original outfit.
+// Operators aren't closet-editable YET (`stripClothes` is the one lever that exists today, and only
+// takes real effect on the operators whose outfit is modeled as separate mesh pieces from their
+// body — see CAN_STRIP_CLOTHES — everyone else's clothes are fused into one mesh with nothing to
+// hide); a real per-operator wardrobe is future work this field set is deliberately shaped to allow
+// without another schema change.
+export const MODES = [
+  { id: 'custom', label: 'Custom' },
+  { id: 'operator', label: 'Operators' },
+];
+export const OPERATORS = [
+  { id: 'frank', label: 'Frank', gender: 'male' },
+  { id: 'hanzo', label: 'Hanzo', gender: 'male' },
+  { id: 'rico', label: 'Rico', gender: 'male' },
+  { id: 'neo', label: 'Neo', gender: 'male' },
+  { id: 'katniss', label: 'Katniss', gender: 'female' },
+  { id: 'selene', label: 'Selene', gender: 'female' },
+  { id: 'diana', label: 'Diana', gender: 'female' },
+  { id: 'furiosa', label: 'Furiosa', gender: 'female' },
+];
+// Operators whose outfit is real separate geometry from their body/skin, so stripClothes actually
+// has something to hide. Checked by both the UI (to greying out the toggle otherwise) and the
+// renderer (public/js/operators.js's GARMENT_MESHES, which must stay in sync with this list).
+export const CAN_STRIP_CLOTHES = new Set(['neo', 'katniss']);
+
 // White -> black, with the natural shades in between (light to dark). Used as swatches AND as
 // the anchor stops of the continuous skin slider.
 export const SKIN_TONES = [
@@ -69,6 +96,9 @@ export const SLOTS = {
 };
 
 export const DEFAULT_APPEARANCE = {
+  mode: 'custom',
+  operator: 'frank',
+  stripClothes: false,
   character: 'male',
   skin: '#bd8155',
   hair: 'buzzed', hairColor: '#2b1d14',
@@ -91,6 +121,9 @@ export function sanitizeAppearance(a) {
   const d = DEFAULT_APPEARANCE;
   const src = a && typeof a === 'object' ? a : {};
   return {
+    mode: MODES.some((m) => m.id === src.mode) ? src.mode : d.mode,
+    operator: OPERATORS.some((o) => o.id === src.operator) ? src.operator : d.operator,
+    stripClothes: !!src.stripClothes,
     character: CHARACTERS.some((c) => c.id === src.character) ? src.character : d.character,
     skin: hex(src.skin, d.skin),
     hair: pick('hair', src.hair, d.hair), hairColor: hex(src.hairColor, d.hairColor),
@@ -108,6 +141,7 @@ export function sanitizeAppearance(a) {
 export function guestAppearance(id) {
   const n = Math.abs(Number(id) || 0);
   return sanitizeAppearance({
+    mode: 'custom', // guests (no saved appearance) always get a Custom look, never a named Operator
     character: n % 2 ? 'female' : 'male',
     skin: SKIN_TONES[(n * 5) % SKIN_TONES.length],
     hairColor: HAIR_COLORS[(n * 7) % HAIR_COLORS.length],
