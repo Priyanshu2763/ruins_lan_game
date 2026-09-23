@@ -2477,3 +2477,29 @@ before finishing, so it isn't left in a test state for the user's own next look.
 their own bundled facial/eye materials aren't tinted or adjustable; remote OTHER players' Operator
 figures don't get any live redress either (matches the existing Custom-body behavior — appearance is
 fixed for the whole match once broadcast, by original design, not something this batch changed).
+
+## Batch 71 (2026-09-23): DONE — fixed Operators' hands-behind-back / invisible-gun bug (scale mismatch)
+
+User screenshot: Katniss holding the AKM with her hands down/behind instead of gripping it forward.
+Real bug, found by measuring rather than guessing: `operators.js` height-normalizes each predefined
+body via `model.scale.setScalar(s)` (their FBX arrives at real centimeters, s≈0.01, vs the Quaternius
+bodies whose geometry is already authored at game scale and never has model.scale touched at all).
+`attachAimAndGuns` (shared by both body types) has several FIXED constants — `AIM_POS` (where the
+gun's grip point sits), `GUN_IN_HAND_OFFSET` — tuned assuming "1 local unit = 1 game unit", which
+`model.scale` breaks for anything parented under `model`. Measured directly before touching code:
+the aim target ended up ~1.4 units from the shoulder (impossible for a ~0.3-long two-bone arm, so
+the IK maxed out reaching for it — the hands-behind-back look) and the held gun itself rendered
+~100x too small (0.0085 units long instead of the intended 0.84 — invisible at that scale, not
+merely small). Fixed by computing `worldScale = model.scale.x` once in `attachAimAndGuns` (1 for
+Quaternius bodies, a no-op there) and dividing the position constants by it before use, plus giving
+every held gun/prop its own `1/worldScale` scale to cancel the inherited shrink.
+
+Verified precisely, not just re-screenshotted: dumped shoulder/hand/aim world positions and the
+gun's actual measured bounding size before and after (reach went from 1.44→0.38, well inside the arm's
+real reach; gun length went from 0.0085→0.8447, matching the intended 0.84) across 3 different
+operators (Frank, Katniss, Diana) so the fix isn't coincidentally right for just one; rendered all 3
+holding the AKM to confirm a natural forward two-handed grip; reproduced the user's exact screenshot
+(Katniss / Walk / AKM in the dashboard preview) before and after. Re-ran the full existing regression
+suite (reconnect, chat, grenade, weapon fire/reload, disconnected-player immunity, operator UI/match)
+clean afterward since this touches shared figure-building code used by every player, not just
+Operators. `demo` test account's appearance reset back to Custom before finishing.

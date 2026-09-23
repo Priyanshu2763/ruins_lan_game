@@ -243,6 +243,20 @@ export function getFigureAnimationClip(fig, name) { return fig && fig.clipsSourc
 // keys (spine_03, upperarm_r, ...) to the real bone names to look up on `model` — omitted for the
 // Quaternius bodies, whose real names already match those keys directly.
 function attachAimAndGuns(model, boneNames) {
+  // Operator bodies are height-normalized via model.scale (a small fraction, ~0.01 — their raw FBX
+  // arrives at real-world centimeters, so bringing a ~175-220 unit tall model down to our ~1.82 game
+  // units needs a real scale, unlike the Quaternius bodies whose geometry is already authored at
+  // game scale and never gets model.scale touched at all). Every fixed constant below (AIM_POS,
+  // GUN_IN_HAND_OFFSET) was tuned assuming "1 local unit = 1 game unit", which model.scale breaks
+  // for anything parented under `model` — found two real symptoms of this: the aim target ended up
+  // ~1.4 units from the shoulder (physically unreachable for a ~0.55-long arm, visible as the IK
+  // maxing out with the hand nowhere near the gun) and the held gun itself rendered ~100x too small
+  // (measured directly: 0.0085 units long instead of the intended 0.84). `worldScale` compensates
+  // both: position constants get divided by it before use, and every held gun/prop gets its own
+  // scale multiplied by its inverse, canceling the inherited shrink so it renders at its actual
+  // fitted size regardless of which body it's attached to. 1 for the Quaternius bodies (their
+  // model.scale is never touched), so this is a no-op there.
+  const worldScale = model.scale.x;
   const bones = {};
   for (const n of ['spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
 
@@ -263,8 +277,8 @@ function attachAimAndGuns(model, boneNames) {
         offset: pos.clone().sub(spineBind),
       };
     };
-    aimStand = mk(AIM_POS, AIM_FORWARD, new THREE.Vector3(0, 1, 0));
-    aimProne = mk(AIM_POS_PRONE, AIM_FORWARD_PRONE, AIM_UP_PRONE);
+    aimStand = mk(AIM_POS.clone().divideScalar(worldScale), AIM_FORWARD, new THREE.Vector3(0, 1, 0));
+    aimProne = mk(AIM_POS_PRONE.clone().divideScalar(worldScale), AIM_FORWARD_PRONE, AIM_UP_PRONE);
     spineBindQ = model.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(bones.spine_03.getWorldQuaternion(new THREE.Quaternion()));
     aim.quaternion.copy(aimStand.quat);
     aim.position.copy(AIM_POS);
@@ -277,10 +291,11 @@ function attachAimAndGuns(model, boneNames) {
   for (const [weaponId, gunTemplateObj] of template.guns) {
     const inst = gunTemplateObj.clone(true); // rigid prop, not skinned — plain deep clone is correct
     inst.visible = false;
+    inst.scale.setScalar(1 / worldScale); // cancel the inherited body scale so the gun keeps its real fitted size
     if (GRIPS[weaponId]) aim.add(inst);
     else if (bones.hand_r) {
       inst.quaternion.copy(GUN_IN_HAND_QUAT);
-      inst.position.copy(GUN_IN_HAND_OFFSET);
+      inst.position.copy(GUN_IN_HAND_OFFSET.clone().divideScalar(worldScale));
       bones.hand_r.add(inst);
     }
     heldGuns.set(weaponId, inst);
