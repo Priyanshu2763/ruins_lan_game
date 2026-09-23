@@ -106,6 +106,7 @@ export function setPreviewAppearance(app) {
 // Crossfades the figure to the selected animation clip.
 function applyPose(fade = true) {
   if (!figure) return;
+  figure.crouch = previewPose === 'Crouch_Idle_Loop'; // see characters.js's updateFigure — levels the head instead of staring at the ground
   const clip = getFigureAnimationClip(figure, previewPose);
   if (!clip) return;
   const next = figure.mixer.clipAction(clip);

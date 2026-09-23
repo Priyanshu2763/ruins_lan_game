@@ -171,7 +171,7 @@ const GRIPS = {
 // along the body axis (+Y) with its sights toward the character's back (-Z), placed ahead of the
 // chest so the stock sits by the shoulder and the muzzle clears the head; elbows go out to the
 // sides and down toward the ground (+Z).
-const AIM_POS_PRONE = new THREE.Vector3(-0.16, 1.62, 0.12);
+const AIM_POS_PRONE = new THREE.Vector3(-0.16, 1.8, -0.15);
 const AIM_FORWARD_PRONE = new THREE.Vector3(0, 1, 0);
 const AIM_UP_PRONE = new THREE.Vector3(0, 0, -1);
 const ELBOW_POLE_PRONE = { r: new THREE.Vector3(-1, -0.2, 0.5), l: new THREE.Vector3(1, -0.2, 0.5) };
@@ -258,7 +258,21 @@ function attachAimAndGuns(model, boneNames) {
   // model.scale is never touched), so this is a no-op there.
   const worldScale = model.scale.x;
   const bones = {};
-  for (const n of ['spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
+  for (const n of ['spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
+  // Bind-pose (pre-animation) local rotations of the neck/head, captured once here before any clip
+  // ever plays — used to re-level a crouching figure's head (see updateFigure): several stock crouch
+  // clips bake in a pronounced downward tilt at the neck/head specifically (on top of whatever the
+  // torso itself leans), which reads as "looking at the ground" rather than a tactical crouch
+  // scanning forward. Resetting neck+head to their bind rotation each frame removes exactly that
+  // extra tilt while still following the torso's own lean (since world orientation = parent's
+  // CURRENT world orientation × this bind-pose local rotation, not a fully fixed world pose).
+  const headBindQ = { neck_01: bones.neck_01 && bones.neck_01.quaternion.clone(), Head: bones.Head && bones.Head.quaternion.clone(),
+    // WORLD-space bind rotation of the head, captured once here — used to pin a crouching head level
+    // regardless of the torso's own forward lean (a bind-LOCAL reset alone still inherits whatever
+    // the spine/neck are currently doing, so a crouch clip with a real forward torso lean still read
+    // as "looking down" even after that — rendered and compared before/after, this is what actually
+    // fixed it, not just a smaller nudge in the same direction).
+    HeadWorld: bones.Head && bones.Head.getWorldQuaternion(new THREE.Quaternion()) };
 
   // Aim anchor: a group whose ORIENTATION is fixed relative to the character (forward, or along
   // the body when prone) and whose POSITION follows the chest bone (see updateFigure). Parenting
@@ -300,7 +314,7 @@ function attachAimAndGuns(model, boneNames) {
     }
     heldGuns.set(weaponId, inst);
   }
-  return { bones, aim, aimStand, aimProne, spineBindQ, heldGuns };
+  return { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, headBindQ };
 }
 
 export function buildCharacterFigure(id, name, appearanceIn) {
@@ -312,8 +326,20 @@ export function buildCharacterFigure(id, name, appearanceIn) {
   // The model faces +Z; this game's forward is -Z (movement.js, the old figure's gun offset), so
   // the yaw applied to the outer group would otherwise turn every remote player to face backwards.
   model.rotation.y = Math.PI;
+  // Prone lays the figure flat by rotating -90° about X — done on THIS group, never on `root`
+  // itself, because root's OWN rotation.y is independently driven every frame by wherever the
+  // player is aiming (see updateRemotePlayers). Combining a yaw rotation and the flatten rotation
+  // on the SAME object via Euler angles doesn't act like two independent rotations — changing
+  // root.rotation.y while root.rotation.x was also set made a prone figure visibly tilt in and out
+  // of the ground as the player's aim direction changed (confirmed by testing: rotating yaw while
+  // X-rotated pulls the "flat" plane itself out of true-horizontal, since three.js composes Euler
+  // components on one object in a fixed order, not as separately-axised rotations). Putting the
+  // flatten on its own child group makes root.rotation.y a pure yaw spin and poseGroup.rotation.x a
+  // pure flatten, each independent of the other with no shared-object Euler interaction at all.
+  const poseGroup = new THREE.Group();
+  poseGroup.add(model);
   const root = new THREE.Group();
-  root.add(model);
+  root.add(poseGroup);
 
   let bodyMesh = null, bodyMaterial = null;
   const eyebrowMaterials = [];
@@ -335,11 +361,11 @@ export function buildCharacterFigure(id, name, appearanceIn) {
   });
 
   const rig = attachAimAndGuns(model);
-  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns } = rig;
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, headBindQ } = rig;
 
   const mixer = new THREE.AnimationMixer(model);
 
-  const fig = { root, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, weaponId: 0, prone: false,
+  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, headBindQ, weaponId: 0, prone: false, crouch: false,
     charId, bodyMesh, bodyMaterial, eyebrowMaterials, dressMeshes: [], isOperator: false, clipsSource: template.clips };
   dressFigure(fig, appearance);
   return fig;
@@ -367,8 +393,10 @@ function buildOperatorFigure(appearance) {
   }
   const model = cloneSkinned(loaded.model);
   model.rotation.y = Math.PI; // same "+Z model-forward vs -Z game-forward" correction as the Quaternius bodies
+  const poseGroup = new THREE.Group(); // prone flatten lives here, never on root — see the Custom-body build above for why
+  poseGroup.add(model);
   const root = new THREE.Group();
-  root.add(model);
+  root.add(poseGroup);
 
   let bodyMesh = null;
   const allMeshes = [];
@@ -376,10 +404,10 @@ function buildOperatorFigure(appearance) {
     if (obj.isSkinnedMesh) { allMeshes.push(obj); obj.frustumCulled = false; if (obj.name === loaded.bodyMesh.name) bodyMesh = obj; }
   });
   const rig = attachAimAndGuns(model, QUAT_TO_MIXAMO);
-  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns } = rig;
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, headBindQ } = rig;
   const mixer = new THREE.AnimationMixer(model);
 
-  const fig = { root, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, weaponId: 0, prone: false,
+  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, headBindQ, weaponId: 0, prone: false, crouch: false,
     charId: opId, bodyMesh, bodyMaterial: null, eyebrowMaterials: [], dressMeshes: allMeshes.filter((m) => m !== bodyMesh),
     isOperator: true, operatorId: opId, garmentMeshNames: loaded.garmentMeshNames, clipsSource: loaded.clips };
   applyStripClothes(fig, appearance);
@@ -449,6 +477,26 @@ function solveArm(fig, side, target, poleDir, handQuat) {
 // Per-frame: advance the animation (legs/torso), then pose both arms around the equipped gun.
 export function updateFigure(fig, dt) {
   fig.mixer.update(dt);
+  // Crouch look-forward fix: several stock crouch clips bake a pronounced extra downward tilt into
+  // the neck/head specifically (found by rendering the pose directly and measuring it — not just a
+  // style choice, it reads as staring at the ground). Resetting neck+head to their BIND-pose local
+  // rotation removes exactly that extra tilt while still following the torso's own current lean
+  // (world orientation is the parent's CURRENT world rotation × this fixed local one, so a crouched
+  // torso still carries the head down somewhat — just not further hunched by the neck/head joints
+  // on top of that). Scoped to crouch only — walk/idle/sprint were never part of this complaint, and
+  // prone has its own separate straight-body pose (see pickAnimName) that doesn't need this.
+  if (fig.crouch && !fig.prone && fig.headBindQ) {
+    if (fig.bones.neck_01 && fig.headBindQ.neck_01) fig.bones.neck_01.quaternion.copy(fig.headBindQ.neck_01);
+    // Head: not just reset to its BIND-LOCAL rotation (that still inherits whatever the spine/neck
+    // are currently doing, so it wasn't enough on its own — rendered and confirmed the head still
+    // visibly pitched down with the torso's own forward crouch lean) — pinned to its bind-pose WORLD
+    // rotation instead, so it reads as level/forward regardless of how far the torso leans.
+    if (fig.bones.Head && fig.headBindQ.HeadWorld && fig.bones.Head.parent) {
+      fig.bones.Head.parent.updateMatrixWorld(true);
+      const parentWorldQ = fig.bones.Head.parent.getWorldQuaternion(_q);
+      fig.bones.Head.quaternion.copy(parentWorldQ.invert().multiply(fig.headBindQ.HeadWorld));
+    }
+  }
   const grips = GRIPS[fig.weaponId];
   if (!grips || !fig.bones.spine_03) return;
   fig.model.updateMatrixWorld(true);
@@ -744,9 +792,13 @@ const ANIM_FADE_SEC = 0.25;
 // real crouch POSE instead of a standing one, so a downed player reads as crouched-and-tipped-
 // over rather than a stiff mannequin toppled sideways.
 function pickAnimName(rp) {
-  // No prone clip exists, so a prone player uses the straight-bodied idle and is laid flat by the
-  // rig rotation below (a crouch pose laid flat came out curled up like a fetal position).
-  if (rp.prone) return 'Idle_Loop';
+  // No prone clip exists, so a prone player is laid flat by the rig rotation below, using the pack's
+  // T-pose as the base — verified by rendering: Idle_Loop's own natural knee bend/weight shift folds
+  // into a curled, fetal-looking shape once rotated flat (confirmed both Idle AND a Crouch pose do
+  // this — it's the bent knees specifically, not which of those two was picked). A_TPose's straight
+  // legs/spine stay a clean straight line when laid down; the arms are overridden by the prone arm-IK
+  // regardless of which clip is playing, so the T-pose's own arms-out shape never actually shows.
+  if (rp.prone) return 'A_TPose';
   if (rp.crouch) return rp.moving ? 'Crouch_Fwd_Loop' : 'Crouch_Idle_Loop';
   if (rp.moving) return rp.sprint ? 'Sprint_Loop' : 'Walk_Loop';
   return 'Idle_Loop';
@@ -767,12 +819,44 @@ function animateRemoteFigure(rp, dt) {
   setRemoteAnim(rp, pickAnimName(rp));
   setFigureWeapon(rp.fig, rp.weapon);
   rp.fig.prone = rp.prone;
+  rp.fig.crouch = rp.crouch;
   updateFigure(rp.fig, dt);
 
   const lerpT = Math.min(1, dt * 8);
   const targetRotX = rp.prone ? -Math.PI / 2 : 0;
-  rp.mesh.rotation.x += (targetRotX - rp.mesh.rotation.x) * lerpT;
-
+  // The flatten rotation lives on poseGroup, never on rp.mesh (root) itself — root.rotation.y is
+  // independently driven every frame by wherever this player is aiming (below, in
+  // updateRemotePlayers). Putting both rotations on the same object doesn't compose as two
+  // independent rotations: three.js resolves an object's rotation as one fixed-order Euler
+  // sequence, so changing root.rotation.y while root.rotation.x was also nonzero visibly tilted a
+  // prone figure in and out of the ground as the player's own aim direction changed. Two separate
+  // objects, each with exactly one rotated axis, avoids that Euler interaction entirely.
+  rp.fig.poseGroup.rotation.x += (targetRotX - rp.fig.poseGroup.rotation.x) * lerpT;
+  // Ground-clamp: rotating a standing pose flat around the FEET doesn't actually guarantee the
+  // resulting horizontal body sits exactly at ground level (found by rendering it: the head measured
+  // ~2cm BELOW y=0, a real clip-through-the-floor bug, not just a rounding nicety). Measured once per
+  // figure the first time it goes prone (the pose held while prone is fixed — A_TPose, see
+  // pickAnimName — so the shape doesn't change frame to frame, no need to remeasure every frame) via
+  // the figure's own actual bounding box rather than a guessed constant, so it stays correct for
+  // every body/proportions, Custom or Operator alike. Applied on model.position.Z, not .y: once
+  // poseGroup is rotated -90° about X, ITS local Z axis is what now points along world Y (checked by
+  // hand: rotating the local basis vector (0,0,1) by Rx(-90°) lands on world (0,1,0)) — model.position
+  // is expressed in poseGroup's own local frame, so that's the axis a "move it up in the real world"
+  // offset has to go on.
+  if (rp.prone) {
+    if (rp.fig.proneGroundOffset === undefined) {
+      const savedRotX = rp.fig.poseGroup.rotation.x;
+      rp.fig.poseGroup.rotation.x = -Math.PI / 2; // measure against the pose's FINAL rotated state, not wherever the lerp currently sits
+      rp.fig.poseGroup.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(rp.fig.model);
+      rp.fig.proneGroundOffset = -box.min.y + 0.02;
+      rp.fig.poseGroup.rotation.x = savedRotX;
+    }
+    rp.fig.model.position.z += (rp.fig.proneGroundOffset - rp.fig.model.position.z) * lerpT;
+  } else if (rp.fig.model.position.z !== 0) {
+    rp.fig.model.position.z += (0 - rp.fig.model.position.z) * lerpT;
+    if (Math.abs(rp.fig.model.position.z) < 0.001) rp.fig.model.position.z = 0;
+  }
 }
 
 // Called once per frame from the bootstrap's animate() — lerps every remote figure toward its

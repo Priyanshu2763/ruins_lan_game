@@ -2503,3 +2503,60 @@ holding the AKM to confirm a natural forward two-handed grip; reproduced the use
 suite (reconnect, chat, grenade, weapon fire/reload, disconnected-player immunity, operator UI/match)
 clean afterward since this touches shared figure-building code used by every player, not just
 Operators. `demo` test account's appearance reset back to Custom before finishing.
+
+## Batch 72 (2026-09-23): DONE — crouch "looking at the ground" and prone (curled + clipping + yaw wobble) fixed
+
+User: all characters (Custom and Operator both) look down instead of forward while crouching, and
+prone has the head going through the ground; then mid-fix, a second real bug: rotating the camera
+sideways while prone makes the character rotate in and out of the ground. All three are shared
+code (`characters.js`, used by every body type identically), found and fixed by rendering the actual
+poses directly rather than guessing from the complaint text alone.
+
+**Crouch head-down.** Rendered `Crouch_Idle_Loop` directly: the stock clip bakes a real, pronounced
+downward tilt into the neck/head specifically (on top of the torso's own forward lean), reading as
+staring at the ground. First attempt (reset neck+head to their BIND-pose LOCAL rotation each frame
+while crouching, so any animation-driven tilt beyond bind is removed) helped but wasn't enough —
+rendered again and the head still visibly pitched down, because a bind-LOCAL reset still inherits
+whatever the torso's CURRENT lean is (crouch genuinely leans the torso forward, that's correct).
+Fixed properly: the head is now pinned to its bind-pose WORLD rotation (captured once at figure-build
+time) instead, so it reads level/forward regardless of how far the torso itself leans. Scoped to
+crouch only (`fig.crouch`, newly tracked — set from `rp.crouch` for remote figures,
+`previewPose==='Crouch_Idle_Loop'` for the dashboard preview) — walk/idle/sprint were never part of
+the complaint and are untouched.
+
+**Prone, three separate real bugs, not one:**
+1. **Curled/fetal shape.** The base pose laid flat was `Idle_Loop` (a standing idle with natural knee
+   bend/weight shift) — rotating that -90° about X folds the bent knees toward the torso instead of
+   producing a straight line. Rendered `Idle_Loop` AND `Crouch_Idle_Loop` both laid flat to confirm
+   it's the bent knees specifically (both curl), then tried the animation library's `A_TPose` (dead
+   straight legs/spine) — clean straight silhouette laid flat, confirmed by rendering top-down. The
+   prone arm-IK already overrides the arms regardless of which clip is playing, so T-pose's own
+   arms-out shape never actually shows; only the leg/torso shape mattered for picking a base pose.
+2. **Head/body through the ground.** Measured directly: with the old pivot-only approach, the head
+   sat 2cm BELOW y=0 — real clipping, not a rounding nicety. Fixed with a real ground-clamp: the
+   figure's own bounding box is measured once (the prone pose is now fixed/A_TPose, so the shape
+   doesn't change frame to frame — no need to remeasure every frame) and the model is shifted to sit
+   exactly at ground level, computed from the actual geometry rather than a guessed constant, so it's
+   correct for any body's proportions, Custom or Operator alike. Also re-tuned `AIM_POS_PRONE`
+   (the gun ended up floating in a completely different place once the base pose changed from
+   Idle_Loop's own lean to A_TPose's near-zero lean) — iterated by rendering the actual result until
+   the gun sat forward at chest height, gripped naturally, instead of poking into the dirt or floating
+   above the head.
+3. **Rotating view makes them wobble in/out of the ground (found mid-fix, from a follow-up report).**
+   Root cause: the flatten rotation (`rotation.x = -90°`) and the yaw-follow rotation (`rotation.y`,
+   driven every frame by wherever that player is aiming) were BOTH being set on the same object
+   (`fig.root`). three.js resolves an object's rotation as one fixed-order Euler sequence, not as
+   independent per-axis rotations — so changing yaw while X was also rotated visibly pulled the "flat"
+   plane out of true horizontal as the player's own aim direction changed. Fixed by moving the flatten
+   rotation onto a new child group (`poseGroup`, inserted between `root` and `model` in both the
+   Custom and Operator figure-build paths) so root.rotation.y is a pure yaw spin and
+   poseGroup.rotation.x is a pure flatten, on two different objects with no shared-object Euler
+   interaction. Verified precisely, not just re-screenshotted: swept yaw through a full circle (9
+   angles, 0 to a full 2π and back) via the real remote-player pipeline and measured the figure's
+   actual world bounding box at each step — minY held at exactly 0.02 at every single angle, zero
+   variation, confirming the wobble is gone rather than just reduced.
+
+All three verified on both a Custom body and an Operator (Rico) side by side, and the full existing
+regression suite (reconnect, chat, grenade, weapon fire/reload, disconnected-player immunity,
+operator UI/match) re-run clean afterward since this touches the shared figure-build/animate code
+every player goes through. `demo` test account reset back to Custom before finishing.
