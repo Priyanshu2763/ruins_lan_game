@@ -25,7 +25,13 @@ export function connectWebSocket({ onOpen, onMessage, onStatus }) {
 }
 
 function openSocket() {
-  const sock = new WebSocket(`ws://${location.host}`);
+  // Scheme MUST follow the page's own protocol, not a hardcoded 'ws://' — a page loaded over
+  // https (any real TLS-terminated public deployment, behind a domain + reverse proxy) is not
+  // allowed by the browser to open a plain insecure ws:// connection (mixed-content blocking);
+  // it silently fails, which breaks everything downstream of the socket even if the page and the
+  // login POSTs (plain relative fetch() calls, unaffected by this) loaded fine.
+  const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const sock = new WebSocket(`${wsScheme}//${location.host}`);
   ws = sock;
   // Every listener ignores a socket that's no longer THE current one, so a late event from an
   // abandoned connection can never re-trigger a reconnect or double-deliver a message.

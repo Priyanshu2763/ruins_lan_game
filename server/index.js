@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import { WebSocketServer } from 'ws';
 import http from 'http';
 import os from 'os';
@@ -23,6 +24,19 @@ const HEARTBEAT_MS = 10000;       // ping cadence; a socket that misses one full
 const CHAT_MAX_LEN = 200, CHAT_HISTORY = 40, CHAT_COOLDOWN_MS = 400;
 
 const app = express();
+// Every JS module, the HTML shell, and every API/WS-adjacent JSON response were being served
+// completely uncompressed (confirmed directly: curl with Accept-Encoding: gzip still got back a
+// raw Content-Length with no Content-Encoding at all) — real, free bandwidth/latency on every
+// single page load. Only compresses text-ish content; already-compressed binary formats (images,
+// audio, FBX/GLB models) are explicitly skipped — gzipping an already-DEFLATE'd PNG or a binary
+// model file burns CPU for near-zero size benefit, sometimes even growing it slightly.
+const COMPRESSIBLE_EXT = /\.(js|mjs|cjs|css|html|json|svg|txt|map)$/i;
+app.use(compression({
+  filter: (req, res) => {
+    if (COMPRESSIBLE_EXT.test(req.path)) return true;
+    return compression.filter(req, res); // falls back to content-type sniffing for API JSON responses etc, which have no file extension
+  },
+}));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/vendor/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build')));

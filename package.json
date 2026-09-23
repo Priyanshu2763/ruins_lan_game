@@ -9,6 +9,7 @@
     "db:seed": "node server/db/seed.js"
   },
   "dependencies": {
+    "compression": "^1.8.2",
     "express": "^4.19.2",
     "pg": "^8.13.0",
     "three": "^0.169.0",
