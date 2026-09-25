@@ -245,32 +245,6 @@ async function loadProfile() {
   }
 }
 
-// ---------- Mobile in-match stats overlay (touchControls.js's #tcStatsBtn) — the dashboard's own
-// Profile tab isn't reachable mid-match (the whole dashboard is hidden while #hud is showing), so
-// this is a small standalone fetch+display reusing the same /api/profile endpoint. ----------
-const statsOverlay = document.getElementById('statsOverlay');
-const msKills = document.getElementById('msKills');
-const msDeaths = document.getElementById('msDeaths');
-const msKD = document.getElementById('msKD');
-const msWins = document.getElementById('msWins');
-const msMatches = document.getElementById('msMatches');
-const statsCloseBtn = document.getElementById('statsCloseBtn');
-export async function showStatsOverlay() {
-  statsOverlay.hidden = false;
-  if (!myUsername) return;
-  try {
-    const res = await fetch(`/api/profile?username=${encodeURIComponent(myUsername)}`);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) return;
-    msKills.textContent = data.kills;
-    msDeaths.textContent = data.deaths;
-    msKD.textContent = data.deaths > 0 ? (data.kills / data.deaths).toFixed(2) : data.kills.toFixed(2);
-    msWins.textContent = data.wins;
-    msMatches.textContent = data.matchesPlayed;
-  } catch (err) { /* leaves the placeholder '–' values, same tolerance as loadProfile() above */ }
-}
-statsCloseBtn.addEventListener('click', () => { statsOverlay.hidden = true; });
-
 // ---------- Closet: every option below is generated from the shared catalog (shared/appearance.js),
 // the same one the renderer and the server validate against, so the three can't disagree. ----------
 const SLOT_LABELS = { hair: 'Hair', beard: 'Facial hair', top: 'Top', bottom: 'Bottom', shoes: 'Shoes', gloves: 'Gloves', head: 'Headwear' };
@@ -456,6 +430,11 @@ const fovVal = document.getElementById('fovVal');
 const sprintModeToggle = document.getElementById('sprintModeToggle');
 const touchSensInput = document.getElementById('touchSensInput');
 const touchSensVal = document.getElementById('touchSensVal');
+const aimModeToggle = document.getElementById('aimModeToggle');
+const adsMouseSensInput = document.getElementById('adsMouseSensInput');
+const adsMouseSensVal = document.getElementById('adsMouseSensVal');
+const adsTouchSensInput = document.getElementById('adsTouchSensInput');
+const adsTouchSensVal = document.getElementById('adsTouchSensVal');
 
 let settingsSyncTimer = null;
 function syncSettingsToServer() {
@@ -470,6 +449,9 @@ function syncSettingsToServer() {
       fov: Number(fovInput.value),
       toggleSprint: state.toggleSprint,
       touchLookSensitivity: Number(touchSensInput.value),
+      aimMode: state.aimMode,
+      adsMouseSensitivity: Number(adsMouseSensInput.value),
+      adsTouchSensitivity: Number(adsTouchSensInput.value),
     };
     fetch('/api/customization', {
       method: 'POST',
@@ -513,6 +495,19 @@ function applyServerSettings(settings) {
   touchSensVal.textContent = `${settings.touchLookSensitivity}%`;
   state.touchLookSensitivity = settings.touchLookSensitivity / 100;
 
+  state.aimMode = settings.aimMode;
+  aimModeToggle.textContent = settings.aimMode === 'toggle' ? 'TOGGLE' : 'HOLD';
+  aimModeToggle.classList.toggle('on', settings.aimMode === 'toggle');
+  aimModeToggle.classList.toggle('off', settings.aimMode !== 'toggle');
+
+  adsMouseSensInput.value = settings.adsMouseSensitivity;
+  adsMouseSensVal.textContent = `${settings.adsMouseSensitivity}%`;
+  state.adsMouseSensitivity = settings.adsMouseSensitivity / 100;
+
+  adsTouchSensInput.value = settings.adsTouchSensitivity;
+  adsTouchSensVal.textContent = `${settings.adsTouchSensitivity}%`;
+  state.adsTouchSensitivity = settings.adsTouchSensitivity / 100;
+
   // Keep the localStorage cache in step too, so the next page load (before loadProfile()
   // resolves) starts from this account's real values instead of stale/default local ones.
   localStorage.setItem('ruins_masterVolume', String(settings.masterVolume));
@@ -522,6 +517,9 @@ function applyServerSettings(settings) {
   localStorage.setItem('ruins_fov', String(settings.fov));
   localStorage.setItem('ruins_toggleSprint', settings.toggleSprint ? '1' : '0');
   localStorage.setItem('ruins_touchLookSensitivity', String(settings.touchLookSensitivity));
+  localStorage.setItem('ruins_aimMode', settings.aimMode);
+  localStorage.setItem('ruins_adsMouseSensitivity', String(settings.adsMouseSensitivity));
+  localStorage.setItem('ruins_adsTouchSensitivity', String(settings.adsTouchSensitivity));
 }
 
 function loadSettings() {
@@ -553,6 +551,18 @@ function loadSettings() {
 
   const touchSens = readPct('ruins_touchLookSensitivity', 100);
   touchSensInput.value = touchSens; touchSensVal.textContent = `${touchSens}%`; state.touchLookSensitivity = touchSens / 100;
+
+  const aimMode = localStorage.getItem('ruins_aimMode') === 'toggle' ? 'toggle' : 'hold';
+  state.aimMode = aimMode;
+  aimModeToggle.textContent = aimMode === 'toggle' ? 'TOGGLE' : 'HOLD';
+  aimModeToggle.classList.toggle('on', aimMode === 'toggle');
+  aimModeToggle.classList.toggle('off', aimMode !== 'toggle');
+
+  const adsMouseSens = readPct('ruins_adsMouseSensitivity', 100);
+  adsMouseSensInput.value = adsMouseSens; adsMouseSensVal.textContent = `${adsMouseSens}%`; state.adsMouseSensitivity = adsMouseSens / 100;
+
+  const adsTouchSens = readPct('ruins_adsTouchSensitivity', 100);
+  adsTouchSensInput.value = adsTouchSens; adsTouchSensVal.textContent = `${adsTouchSens}%`; state.adsTouchSensitivity = adsTouchSens / 100;
 }
 loadSettings();
 
@@ -599,6 +609,34 @@ sprintModeToggle.addEventListener('click', () => {
   sprintModeToggle.classList.toggle('on', toggleSprint);
   sprintModeToggle.classList.toggle('off', !toggleSprint);
   localStorage.setItem('ruins_toggleSprint', toggleSprint ? '1' : '0');
+  syncSettingsToServer();
+});
+
+// ---------- Aim-down-sights (ADS): mode toggle + its own separate mouse/touch sensitivity,
+// same HOLD/TOGGLE convention as sprintModeToggle just above, and the same synced-settings
+// pattern as every other control in this block. ----------
+aimModeToggle.addEventListener('click', () => {
+  const mode = state.aimMode === 'toggle' ? 'hold' : 'toggle';
+  state.aimMode = mode;
+  state.aiming = false; // clean slate switching modes mid-session, same as sprint's toggle reset
+  aimModeToggle.textContent = mode === 'toggle' ? 'TOGGLE' : 'HOLD';
+  aimModeToggle.classList.toggle('on', mode === 'toggle');
+  aimModeToggle.classList.toggle('off', mode !== 'toggle');
+  localStorage.setItem('ruins_aimMode', mode);
+  syncSettingsToServer();
+});
+adsMouseSensInput.addEventListener('input', () => {
+  const sens = Number(adsMouseSensInput.value);
+  adsMouseSensVal.textContent = `${sens}%`;
+  state.adsMouseSensitivity = sens / 100;
+  localStorage.setItem('ruins_adsMouseSensitivity', String(sens));
+  syncSettingsToServer();
+});
+adsTouchSensInput.addEventListener('input', () => {
+  const sens = Number(adsTouchSensInput.value);
+  adsTouchSensVal.textContent = `${sens}%`;
+  state.adsTouchSensitivity = sens / 100;
+  localStorage.setItem('ruins_adsTouchSensitivity', String(sens));
   syncSettingsToServer();
 });
 

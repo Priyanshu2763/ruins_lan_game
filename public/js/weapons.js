@@ -8,7 +8,7 @@ import { sfx, playBuffer, playPositionalOneShot, playPositionalLoopStart, update
 import { sendMsg } from './net.js';
 import { getRemoteGunMuzzle } from './characters.js';
 import { spawnMuzzleFlash, spawnSmoke } from './weaponfx.js';
-import { initViewmodel, kickViewmodel, setViewmodelAmmo, setTriggerHeld, throwKick, setViewmodelWeapon, startReloadAnim, cancelReloadAnim, raiseViewmodel, getMuzzleWorld, grenadeReady, grenadeThrow, grenadeCancel, isGrenadeBusy, onGrenadePin } from './viewmodel.js';
+import { initViewmodel, kickViewmodel, setViewmodelAmmo, setTriggerHeld, throwKick, setViewmodelWeapon, startReloadAnim, cancelReloadAnim, raiseViewmodel, getMuzzleWorld, grenadeReady, grenadeThrow, grenadeCancel, isGrenadeBusy, onGrenadePin, setViewmodelAiming } from './viewmodel.js';
 
 const crosshair = document.getElementById('crosshair');
 const weaponBar = document.getElementById('weaponBar');
@@ -98,11 +98,35 @@ export function setWeapon(idx) {
   cancelReload(); // switching weapons drops any in-progress reload, no ammo change
   stopFiring(); // switching away mid-hold shouldn't leave a stale interval/spray loop running
   cancelGrenadeEquipMobile(); // no-op on desktop (flag never set there) — mobile safety net for tapping a weapon card mid-equip
+  stopAim(); // simplest safe behavior — switching always drops ADS, same as it drops a reload/grenade-equip
   currentWeapon = idx;
   setViewmodelWeapon(idx);
   updateWeaponBar();
 }
 updateWeaponBar();
+
+// ---------- Aim down sights (ADS) ----------
+// Visual/FOV only for now (no accuracy/spread change — the game's hitscan is already perfectly
+// precise regardless of stance, so there's nothing to tighten). Melee has no sight, so it's not
+// aimable. HOLD (button/right-click held down) vs TOGGLE (press once each way) is a Settings-tab
+// choice (state.aimMode) that both desktop and mobile read — see client.js's right-click wiring
+// and touchControls.js's dedicated ADS button.
+export function isAiming() { return state.aiming; }
+export function startAim() {
+  if (state.aiming || !state.localAlive || !state.sceneReady || state.chatOpen || isGrenadeBusy()) return;
+  if (WEAPONS[currentWeapon].type === 'melee') return;
+  if (reloadState && reloadState.idx === currentWeapon) return; // reload lifts the gun to the eyes already — don't fight that pose
+  state.aiming = true;
+  setViewmodelAiming(true);
+  crosshair.classList.add('chHidden'); // the sight itself is the reticle while aimed
+}
+export function stopAim() {
+  if (!state.aiming) return;
+  state.aiming = false;
+  setViewmodelAiming(false);
+  crosshair.classList.remove('chHidden');
+}
+export function toggleAim() { if (state.aiming) stopAim(); else startAim(); }
 
 // Reload takes real time (per-weapon `reloadTime`) instead of being instant — the card shows
 // a blinking ring + remaining-seconds countdown while it runs. Firing is blocked until it
@@ -119,6 +143,7 @@ export function reload() {
   const a = ammo[currentWeapon];
   if (w.magSize - a.mag <= 0) return;
   if (a.reserve <= 0) { sfx.empty(); return; }
+  stopAim(); // simplest safe behavior — same as a weapon switch, avoids fighting the reload's own lift-to-eyes pose
   const now = performance.now();
   reloadState = { idx: currentWeapon, startedAt: now, endsAt: now + w.reloadTime, duration: w.reloadTime };
   reloadSoundSource = sfx.reload(w);
@@ -200,6 +225,22 @@ document.addEventListener('mousedown', (e) => {
 });
 document.addEventListener('mouseup', () => { stopFiring(); });
 
+// Right-click = aim down sights on PC (touchControls.js wires the mobile equivalent to a
+// dedicated button). contextmenu is prevented globally so right-click never pops the browser's
+// menu mid-match — pointer lock already suppresses it in most browsers, but not reliably all of
+// them, and this is harmless the rest of the time (menu/dashboard screens have no right-click
+// need). HOLD vs TOGGLE reads state.aimMode live on every click, so switching the Settings-tab
+// toggle mid-match takes effect on the very next right-click, no reload/rejoin needed.
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+document.addEventListener('mousedown', (e) => {
+  if (!state.pointerLocked || e.button !== 2 || state.chatOpen) return;
+  if (state.aimMode === 'toggle') toggleAim(); else startAim();
+});
+document.addEventListener('mouseup', (e) => {
+  if (e.button !== 2 || state.aimMode === 'toggle') return;
+  stopAim();
+});
+
 let lastLocalFire = 0;
 function fire() {
   if (!state.localAlive || !state.sceneReady || isGrenadeBusy()) return;
@@ -253,6 +294,7 @@ export function equipGrenadeMobile() {
   if (performance.now() - lastGrenadeThrow < GRENADE_COOLDOWN_MS) return;
   cancelReload();
   stopFiring();
+  stopAim();
   grenadeEquippedMobile = true;
   grenadeReady(); // raises it into the hand — no trajectory yet, that's gated on the fire button
 }
@@ -310,6 +352,7 @@ export function startGrenadeAim() {
   if (performance.now() - lastGrenadeThrow < GRENADE_COOLDOWN_MS) return;
   cancelReload(); // hands are busy — same as switching weapons: no partial reload
   stopFiring();
+  stopAim();
   grenadeAiming = true;
   trajectoryLine.visible = true;
   trajectoryMarker.visible = true;
@@ -466,6 +509,7 @@ export function applyLoadout(l) {
 
 export function resetLoadout() {
   raiseViewmodel();
+  state.aiming = false; // belt-and-suspenders alongside death.js's own stopAim() call on death
   WEAPONS.forEach((w, i) => { ammo[i] = { mag: w.magSize, reserve: w.reserveMax }; });
   grenadeCount = GRENADE_START_COUNT;
   updateWeaponBar();

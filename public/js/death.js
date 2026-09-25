@@ -1,7 +1,7 @@
 import { RESPAWN_MS, STAND_EYE_HEIGHT } from '/shared/gameData.js';
 import { state } from './state.js';
 import { sfx } from './audio.js';
-import { resetLoadout } from './weapons.js';
+import { resetLoadout, stopAim } from './weapons.js';
 import { setStance } from './movement.js';
 
 const centerMsg = document.getElementById('centerMsg');
@@ -76,6 +76,7 @@ let deathStartEyeY = 0, deathStartPitch = 0, deathTargetEyeY = 0, deathRollTarge
 
 export function onLocalDeath(killerName) {
   state.localAlive = false;
+  stopAim(); // don't carry ADS (blocked sprint, narrowed FOV) through into the next life
   centerMsg.hidden = false;
   centerMsg.textContent = killerName
     ? `Eliminated by ${killerName} — respawning...`

@@ -15,6 +15,9 @@ export const DEFAULT_SETTINGS = {
   fov: 75,
   toggleSprint: false,
   touchLookSensitivity: 100,
+  aimMode: 'hold', // 'hold' = right-click/button held down, 'toggle' = one press each way
+  adsMouseSensitivity: 100,
+  adsTouchSensitivity: 100,
 };
 
 export function sanitizeSettings(input) {
@@ -28,6 +31,9 @@ export function sanitizeSettings(input) {
     fov: pct(src.fov, DEFAULT_SETTINGS.fov, 60, 110),
     toggleSprint: src.toggleSprint === true,
     touchLookSensitivity: pct(src.touchLookSensitivity, DEFAULT_SETTINGS.touchLookSensitivity, 20, 200),
+    aimMode: src.aimMode === 'toggle' ? 'toggle' : 'hold',
+    adsMouseSensitivity: pct(src.adsMouseSensitivity, DEFAULT_SETTINGS.adsMouseSensitivity, 20, 200),
+    adsTouchSensitivity: pct(src.adsTouchSensitivity, DEFAULT_SETTINGS.adsTouchSensitivity, 20, 200),
   };
 }
 function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }

@@ -21,6 +21,22 @@ const REST = {
 // Sprinting: gun lowered and canted across the body, the classic "port arms" carry.
 const SPRINT = { pos: new THREE.Vector3(0.0, -0.09, 0.05), rot: new THREE.Euler(0.22, -0.30, 0.10) };
 
+// Aim-down-sights pose per weapon: gun pulled in close and centered so its sight (iron sight on
+// the AKM's own molded geometry, or the reddot/holo mounted in characters.js's mountSight) lines
+// up with the camera. No entry for the knife (id 3) — melee has no sight, weapons.js's startAim()
+// refuses to aim it, so AIM[3] is never read. First-pass numbers, tuned by rendering the actual
+// result (see this batch's own notes) — worth a real look for exact sight-to-crosshair alignment.
+const AIM = {
+  // Pulled in noticeably closer than the reddot/holo entries below, and its own tighter
+  // per-weapon fovMult (see updateAdsFov) — the explicit ask was a tight, "looking right
+  // through the sight" iron-sight view (matching the reference screenshot), not just a mild
+  // pose shift. fovMult on the other two is the same mild non-magnified-optic narrow as before.
+  0: { pos: new THREE.Vector3(0, -0.075, -0.34), rot: new THREE.Euler(0, 0, 0), fovMult: 0.62 },   // AKM iron sight
+  1: { pos: new THREE.Vector3(0, -0.09, -0.36), rot: new THREE.Euler(0, 0, 0), fovMult: 0.82 },   // Shotgun holo
+  2: { pos: new THREE.Vector3(0, -0.08, -0.34), rot: new THREE.Euler(0, 0, 0), fovMult: 0.82 },   // Glock red dot
+};
+let aimBlend = 0; // 0 = hip, 1 = fully aimed, smoothed each frame in computePose
+
 let fpScene = null, fpRoot = null, rig = null, muzzleFlash = null;
 let appearance = null;
 let templateReady = false;
@@ -111,8 +127,33 @@ export function setViewmodelAppearance(app) {
 }
 export function getMuzzleFlashTexture() { return muzzleFlash.material.map; }
 
+// Called from the bootstrap's animate() BEFORE the world render (not from renderViewmodel, which
+// runs AFTER it) — camera.fov has to be current for the world's own render call this same frame,
+// or the world and the gun's separate render pass would visibly disagree on FOV for one frame
+// during the transition. Smoothed over ~0.15s, same "ease toward a target" shape as aimBlend
+// itself (computed independently here rather than reusing aimBlend directly, since this needs to
+// run before computePose does this frame).
+let fovBlend = 0;
+export function updateAdsFov(dt) {
+  if (!state.camera) return;
+  const aim = AIM[weaponId];
+  const target = state.aiming && aim ? 1 : 0;
+  fovBlend += (target - fovBlend) * Math.min(1, dt / 0.15);
+  const mult = aim ? aim.fovMult : 1;
+  const fov = state.fov * (1 - fovBlend * (1 - mult));
+  if (Math.abs(state.camera.fov - fov) > 0.001) {
+    state.camera.fov = fov;
+    state.camera.updateProjectionMatrix();
+  }
+}
+
 export function setViewmodelWeapon(id) { if (id !== weaponId) { weaponId = id; switchT = 0; slash = 0; } }
 export function setViewmodelVisible(v) { visible = v; }
+// weapons.js's startAim()/stopAim() call this on every transition — state.aiming (which
+// computePose/updateAdsFov actually read each frame) is already the real source of truth, so
+// this is presently just an explicit hook, kept for symmetry with every other "something
+// happened" call in this file and as the natural place to add an aim-in/out cue later.
+export function setViewmodelAiming(_v) {}
 // A shot was fired: `emptyAfter` = that was the last round (the Glock's slide then stays back).
 export function kickViewmodel(id, emptyAfter = false) {
   if (WEAPONS[id]?.type === 'melee') { slash = 0.0001; return; }
@@ -216,6 +257,21 @@ function computePose(dt) {
   // arms flex to follow it) and its size depended on the frame rate. The gun is locked to the view;
   // only walking, firing, reloading etc. move it (no idle breathing either: standing still = perfectly still).
 
+  // Aim down sights: blend toward AIM[w]'s pose (see its own comment) — done FIRST, right after the
+  // hip-fire base pose, so it becomes the effective "resting" position that everything below (bob,
+  // sprint carry, recoil, gunAnim) still layers on top of exactly as before, rather than needing its
+  // own special-cased interaction with each of those. Melee has no AIM entry, so aiming a knife is a
+  // no-op here regardless of state.aiming (weapons.js's startAim() already refuses to set it anyway).
+  const aim = AIM[w];
+  const aimTarget = state.aiming && aim ? 1 : 0;
+  aimBlend += (aimTarget - aimBlend) * Math.min(1, dt / 0.15);
+  if (aimBlend > 0.001 && aim) {
+    pos.lerp(aim.pos, aimBlend);
+    rot.x += (aim.rot.x - rest.rot.x) * aimBlend;
+    rot.y += (aim.rot.y - rest.rot.y) * aimBlend;
+    rot.z += (aim.rot.z - rest.rot.z) * aimBlend;
+  }
+
   // walk bob (stronger and faster while sprinting)
   const moving = state.isMoving && !state.falling;
   const sprinting = moving && state.isSprinting;
@@ -224,7 +280,9 @@ function computePose(dt) {
   const sprintTarget = sprinting && !squaredUp ? 1 : 0;
   sprintBlend += (sprintTarget - sprintBlend) * Math.min(1, dt * (sprintTarget < sprintBlend ? 18 : 8)); // snaps straight fast, eases back into the carry
   if (moving) bob += dt * (sprinting ? 12.5 : 8.5);
-  const bobAmt = moving ? (sprinting && !squaredUp ? 1.0 : 0.55) : 0;
+  // Steadier while aiming (real ADS visibly dampens sway), but not perfectly rigid — a little
+  // motion survives even at full aimBlend so walking-while-aimed doesn't look robotic.
+  const bobAmt = (moving ? (sprinting && !squaredUp ? 1.0 : 0.55) : 0) * (1 - aimBlend * 0.7);
   pos.y += Math.abs(Math.sin(bob)) * 0.014 * bobAmt - 0.005 * bobAmt;
   pos.x += Math.cos(bob) * 0.008 * bobAmt;
 

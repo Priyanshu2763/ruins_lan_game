@@ -8,6 +8,7 @@ import { guestAppearance, sanitizeAppearance } from '/shared/appearance.js';
 import { playPositionalLoopStart, dryPositionFor, applyOcclusionParams, isOccludedBetween, localListenerPos } from './audio.js';
 import { QUAT_TO_MIXAMO } from './retarget.js';
 import { isOperatorId, canStripClothes, loadOperator, getLoadedOperator } from './operators.js';
+import { buildRedDotSight, buildHoloSight } from './sights.js';
 
 // Real assets (Quaternius, CC0 — see CLAUDE.md for the batch that added these) replacing the
 // old stacked-BoxGeometry figure: a rigged/animated humanoid + a shared animation library +
@@ -19,6 +20,19 @@ const SKIN_TEXTURE_URLS = { male: '/models/character/T_Skin_Male_Neutral.png', f
 const ANIMATIONS_URL = '/models/animations/animations.glb';
 // Keyed by WEAPONS[].id (see shared/gameData.js) — 0 AKM, 1 Shotgun, 2 Glock, 3 Combat Knife.
 const GUN_URLS = { 0: '/models/guns/akm.fbx', 1: '/models/guns/shotgun.fbx', 2: '/models/guns/glock.fbx', 3: '/models/guns/knife.fbx' };
+// Optics for ADS (see viewmodel.js's AIM poses) — real procedural sights (sights.js), not a
+// downloaded asset: the first attempt used free CC0 models (Pichuliru, Poly Pizza) but they read
+// as crude/flat next to a real optic, so these were hand-built instead with real housing shapes
+// and canvas-drawn reticles, same technique as every other hand-crafted prop in this project. The
+// AKM uses its own molded iron sight (already part of its single fused mesh, see GUN_FIT's
+// comment) — no attachment needed.
+// weaponId -> which sight mounts on it, how far along the barrel (0=butt/grip .. 1=muzzle,
+// same fraction convention GUN_FIT.grip already uses) and how high above the gun's own top
+// surface. First-pass estimates, tuned by rendering the actual result (see normalizeGun below).
+const SIGHT_MOUNTS = {
+  1: { build: buildHoloSight, mountFrac: 0.42, gap: 0.006, scale: 1.3 }, // Shotgun — receiver-top rail; real holo housings read visibly chunkier than a red dot's tube
+  2: { build: buildRedDotSight, mountFrac: 0.55, gap: 0.004, scale: 1.0 }, // Glock — slide-top rail
+};
 
 // The FBX guns arrive ~100x too large (the AKM measures 310 units long against a ~0.9m rifle) and
 // with their origin at the stock end. Sizing from the MEASURED bounding box, rather than a
@@ -121,6 +135,23 @@ function splitGunParts(obj, weaponId, box, size) {
 }
 const partCenters = new WeakMap(); // part mesh -> centre in its own (obj-local) coordinates
 
+// Mounts a red-dot/holo sight (SIGHT_MOUNTS) onto a gun's rail — attached to `outer` (not
+// `holder`, which carries the gun's own non-uniform `fit.slim` squash) so the sight's own
+// proportions aren't stretched by that. Position is computed directly in real-world meters from
+// the SAME numbers normalizeGun already has (`s`, `fit`, `size`) rather than guessed constants,
+// so it stays correct if GUN_FIT/SIGHT_MOUNTS get retuned later. sights.js's builders already
+// return their own real-world-scale geometry with +X as the viewing axis (matching the gun's own
+// +X/barrel axis) and origin at the mount's base — no extra rotation needed, just position.
+function mountSight(outer, weaponId, s, fit, size) {
+  const mount = SIGHT_MOUNTS[weaponId];
+  if (!mount) return;
+  const sight = mount.build();
+  const topY = s * fit.slim * size.y / 2; // gun's own top surface in outer-local meters (see normalizeGun's own comment on this derivation)
+  sight.scale.setScalar(mount.scale);
+  sight.position.set(fit.length * mount.mountFrac, topY + mount.gap, 0);
+  outer.add(sight);
+}
+
 function normalizeGun(obj, fit, weaponId) {
   restyleGunMaterials(obj);
   obj.updateMatrixWorld(true);
@@ -135,6 +166,7 @@ function normalizeGun(obj, fit, weaponId) {
   holder.scale.set(s, s * fit.slim, s * fit.slim);
   const outer = new THREE.Group();
   outer.add(holder);
+  mountSight(outer, weaponId, s, fit, size);
   return outer;
 }
 
@@ -203,7 +235,8 @@ async function loadTemplate() {
     ...gunIds.map((id) => fbxLoader.loadAsync(GUN_URLS[id])),
     ...HAIR_FILES.map((f) => gltfLoader.loadAsync(`/models/character/hair/${f}.gltf`)),
   ]);
-  const gunObjs = rest.slice(0, gunIds.length), hairs = rest.slice(gunIds.length);
+  const gunObjs = rest.slice(0, gunIds.length);
+  const hairs = rest.slice(gunIds.length, gunIds.length + HAIR_FILES.length);
   const clips = new Map();
   for (const clip of animGltf.animations) clips.set(clip.name, clip);
   const guns = new Map();

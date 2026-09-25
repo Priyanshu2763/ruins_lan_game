@@ -14,11 +14,12 @@ export const DEFAULT_TOUCH_LAYOUT = {
   prone:    { anchor: 'br', x: 225, y: 55 },
   reload:   { anchor: 'br', x: 70,  y: 200 },
   grenade:  { anchor: 'br', x: 225, y: 130 },
+  ads:      { anchor: 'br', x: 295, y: 95 },
   lookZoneLeftPct: 34,
 };
 
 const ANCHORS = new Set(['bl', 'br', 'tl', 'tr']);
-const CONTROL_KEYS = ['joystick', 'fire', 'jump', 'crouch', 'prone', 'reload', 'grenade'];
+const CONTROL_KEYS = ['joystick', 'fire', 'jump', 'crouch', 'prone', 'reload', 'grenade', 'ads'];
 
 // Unknown keys are dropped, bad shapes fall back to the default for that one control (not the
 // whole layout) — a corrupt/tampered single entry shouldn't cost the player their entire saved

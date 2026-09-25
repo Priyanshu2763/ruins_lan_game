@@ -24,7 +24,7 @@ import {
   stopFiring, showHitMarker, handleRemoteShot, applyPickup, updateReload, updateTrajectoryPreview,
   getCurrentWeaponIndex, startGrenadeAim, releaseGrenadeThrow, reload, getLoadout, applyLoadout,
 } from './js/weapons.js';
-import { renderViewmodel, setViewmodelAppearance } from './js/viewmodel.js';
+import { renderViewmodel, setViewmodelAppearance, updateAdsFov } from './js/viewmodel.js';
 import { updateWeaponFx } from './js/weaponfx.js';
 import { guestAppearance } from '/shared/appearance.js';
 import { onLocalDeath, onLocalRespawn, updateDeathAnim, setHealth, flashDamage } from './js/death.js';
@@ -282,6 +282,7 @@ function animate() {
     state.camera.position.set(0, 0, 0);
   }
   sendState(dt, getCurrentWeaponIndex());
+  updateAdsFov(dt); // must run before the world render below — see its own comment
   state.renderer.render(state.scene, state.camera);
   renderViewmodel(state.renderer, state.camera, dt); // arms + gun, drawn over the world with a cleared depth buffer
 }

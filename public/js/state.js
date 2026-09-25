@@ -53,6 +53,13 @@ export const state = {
   toggleSprint: false, // false = hold Shift to sprint (default), true = tap Shift to toggle it
   sprintToggledOn: false, // only meaningful while toggleSprint is true — movement.js owns this
 
+  // ---- aim-down-sights (weapons.js owns the writes; movement.js reads `aiming` to block sprint
+  // and to pick ADS vs normal look sensitivity; viewmodel.js reads it to blend to the aim pose) ----
+  aiming: false,
+  aimMode: 'hold', // 'hold' = right-click/button held down (PUBG default), 'toggle' = one press each way — Settings tab
+  adsMouseSensitivity: 1,
+  adsTouchSensitivity: 1,
+
   // ---- session/alive flags (death.js and the bootstrap's onMatchEnded own the writes; read
   // almost everywhere movement/firing/input needs to be frozen) ----
   localAlive: true,

@@ -11,9 +11,10 @@ import { tryJump, setStance, applyLookDelta } from './movement.js';
 import {
   startFireSequence, stopFiring, reload, setWeapon, cancelGrenadeAim,
   equipGrenadeMobile, startAimingThrowMobile, releaseGrenadeThrow, cancelGrenadeEquipMobile, isGrenadeEquippedMobile,
+  startAim, stopAim, toggleAim,
 } from './weapons.js';
 import { isGrenadeBusy } from './viewmodel.js';
-import { pauseMenu, openChat, closeChat, registerTouchLockHandlers, showStatsOverlay } from './ui.js';
+import { pauseMenu, openChat, closeChat, registerTouchLockHandlers, showScoreboard, hideScoreboard } from './ui.js';
 import { loadTouchLayout, makeDraggable, makeLookZoneHandleDraggable, getLookZoneLeftPct, exitCustomizeMode } from './touchLayout.js';
 
 if (isTouchDevice()) buildTouchControls();
@@ -56,16 +57,18 @@ function buildTouchControls() {
   const proneBtn = makeButton('tcProne', 'tcBtnSm', 'PR');
   const reloadBtn = makeButton('tcReload', 'tcBtnSm', 'RLD');
   const grenadeBtn = makeButton('tcGrenade', 'tcBtnSm', 'GRN');
+  const adsBtn = makeButton('tcAds', 'tcBtnSm', 'ADS');
   const grenadeBadge = document.createElement('span');
   grenadeBadge.id = 'tcGrenadeBadge';
   grenadeBtn.appendChild(grenadeBadge); // count shown here instead of a separate weapon-bar card, see below
-  [fireBtn, jumpBtn, crouchBtn, proneBtn, reloadBtn, grenadeBtn].forEach((el) => root.appendChild(el));
+  [fireBtn, jumpBtn, crouchBtn, proneBtn, reloadBtn, grenadeBtn, adsBtn].forEach((el) => root.appendChild(el));
   makeDraggable(fireBtn, 'fire');
   makeDraggable(jumpBtn, 'jump');
   makeDraggable(crouchBtn, 'crouch');
   makeDraggable(proneBtn, 'prone');
   makeDraggable(reloadBtn, 'reload');
   makeDraggable(grenadeBtn, 'grenade');
+  makeDraggable(adsBtn, 'ads');
 
   bindFire(fireBtn);
   bindTap(jumpBtn, () => tryJump());
@@ -76,6 +79,7 @@ function buildTouchControls() {
   bindTap(proneBtn, () => setStance(false, !state.isProne));
   bindTap(reloadBtn, () => reload());
   bindGrenade(grenadeBtn);
+  bindAds(adsBtn);
   bindWeaponCards();
 
   // ---- Pause + chat (small, top-area utility buttons; not part of the draggable BGMI cluster) ----
@@ -114,8 +118,12 @@ function buildTouchControls() {
     toggleFullscreen();
   }, { passive: false });
 
-  // Stats — the dashboard's own Profile tab isn't reachable mid-match, so this is the only way
-  // to check kills/deaths/wins without quitting. Top-middle, per the explicit placement ask.
+  // Stats — desktop views the live MATCH scoreboard/leaderboard by holding Tab (client.js); touch
+  // has no keyboard, so this button mirrors that exact hold-to-view behavior (show on press, hide
+  // on release) rather than a tap-toggle, using the same #scoreboard element and
+  // showScoreboard()/hideScoreboard() desktop already calls — this is the match leaderboard
+  // (kills/deaths per player in the room), not the dashboard's own per-account profile stats.
+  // Top-middle, per the explicit placement ask.
   const statsBtn = document.createElement('button');
   statsBtn.id = 'tcStatsBtn';
   statsBtn.type = 'button';
@@ -124,8 +132,10 @@ function buildTouchControls() {
   statsBtn.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     if (state.touchCustomizing) return;
-    showStatsOverlay();
+    showScoreboard();
   }, { passive: false });
+  statsBtn.addEventListener('pointerup', (e) => { e.preventDefault(); hideScoreboard(); }, { passive: false });
+  statsBtn.addEventListener('pointercancel', (e) => { e.preventDefault(); hideScoreboard(); }, { passive: false });
 
   // ---- Customize-mode "Done" button (hidden outside edit mode, see touchLayout.js) ----
   const doneBtn = document.createElement('button');
@@ -141,7 +151,7 @@ function buildTouchControls() {
   // gesture-level interruption; this covers the coarser "the whole page went into the background"
   // case, which pointercancel isn't guaranteed to fire for on every browser.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { cancelGrenadeAim(); stopFiring(); }
+    if (document.hidden) { cancelGrenadeAim(); stopFiring(); stopAim(); hideScoreboard(); syncAdsVisual(); }
   });
 
   window.addEventListener('resize', updateRotateOverlay);
@@ -249,7 +259,7 @@ function bindLookZone(zone) {
     const widthScale = REFERENCE_WIDTH / window.innerWidth;
     const dx = (e.clientX - lastX) * widthScale, dy = (e.clientY - lastY) * widthScale;
     lastX = e.clientX; lastY = e.clientY;
-    applyLookDelta(dx, dy, TOUCH_BASE_SENS_MULT * state.touchLookSensitivity);
+    applyLookDelta(dx, dy, TOUCH_BASE_SENS_MULT * (state.aiming ? state.adsTouchSensitivity : state.touchLookSensitivity));
   });
   const end = (e) => { if (pointerId === e.pointerId) pointerId = null; };
   zone.addEventListener('pointerup', end);
@@ -291,6 +301,7 @@ function bindFire(el) {
     if (aimingGrenadeThisPress) releaseGrenadeThrow();
     else stopFiring();
     updateGrenadeEquippedVisual(); // the throw just cleared grenadeEquippedMobile — reflect that
+    syncAdsVisual();
   };
   el.addEventListener('pointerup', end);
   el.addEventListener('pointercancel', end);
@@ -299,6 +310,15 @@ function bindFire(el) {
 function updateGrenadeEquippedVisual() {
   const el = document.getElementById('tcGrenade');
   if (el) el.classList.toggle('tcGrenadeEquipped', isGrenadeEquippedMobile());
+}
+
+// Same "resync after a cross-module state change" need as updateGrenadeEquippedVisual above —
+// stopAim() is called from several places outside this file (setWeapon, reload, grenade equip),
+// so the button's own highlight class needs a matching resync at every point that might have
+// triggered one of those, not just its own bindAds handler.
+function syncAdsVisual() {
+  const el = document.getElementById('tcAds');
+  if (el) el.classList.toggle('tcAdsActive', state.aiming);
 }
 
 // A plain tap now, not a hold — equips the grenade (into-hand, no trajectory yet); tapping again
@@ -311,7 +331,27 @@ function bindGrenade(el) {
     if (isGrenadeEquippedMobile()) cancelGrenadeEquipMobile();
     else equipGrenadeMobile();
     updateGrenadeEquippedVisual();
+    syncAdsVisual();
   }, { passive: false });
+}
+
+// Dedicated ADS button, PUBG-style — reads the same state.aimMode Settings-tab choice as
+// desktop's right-click (see weapons.js), so switching HOLD/TOGGLE there applies identically to
+// both input methods rather than needing a second mobile-only setting.
+function bindAds(el) {
+  el.addEventListener('pointerdown', (e) => {
+    if (state.touchCustomizing) return;
+    e.preventDefault();
+    if (state.aimMode === 'toggle') toggleAim(); else startAim();
+    el.classList.toggle('tcAdsActive', state.aiming);
+  }, { passive: false });
+  const end = () => {
+    if (state.touchCustomizing || state.aimMode === 'toggle') return;
+    stopAim();
+    el.classList.remove('tcAdsActive');
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
 }
 
 // BGMI-style weapon switching: tap a card in the existing #weaponBar directly instead of cycling
@@ -337,6 +377,7 @@ function bindWeaponCards() {
     cancelGrenadeEquipMobile(); // tapping a weapon card should back out of a pending grenade equip, same as any other weapon switch
     setWeapon(idx);
     updateGrenadeEquippedVisual();
+    syncAdsVisual();
   }, { passive: false });
 }
 
@@ -372,7 +413,9 @@ export function pauseTouchControls() {
   stopFiring();
   cancelGrenadeAim(); // covers mid-aim (fire was held); also clears a pending equip as of its own fix below
   cancelGrenadeEquipMobile(); // covers "equipped but never held fire" — cancelGrenadeAim() alone no-ops in that case since grenadeAiming is still false
+  stopAim();
   updateGrenadeEquippedVisual();
+  syncAdsVisual();
 }
 export function resumeTouchControls() { requestGameFullscreen(); }
 

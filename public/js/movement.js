@@ -158,7 +158,7 @@ export function updateMovement(dt) {
   // (below, once isMoving is known) so pressing a move key again doesn't unexpectedly take off
   // running from a stale toggle.
   const shiftActive = state.toggleSprint ? state.sprintToggledOn : (state.keys.has('ShiftLeft') || state.keys.has('ShiftRight'));
-  const sprinting = !state.isCrouched && !state.isProne && shiftActive;
+  const sprinting = !state.isCrouched && !state.isProne && !state.aiming && shiftActive; // no sprinting while aimed down sights — walk speed only
   state.isSprinting = sprinting;
   setCrosshairSpread(sprinting ? '13px' : '7px');
   const speed = state.isProne ? PRONE_SPEED : state.isCrouched ? 3.0 : sprinting ? 8.5 : 5.5;
@@ -226,5 +226,5 @@ export function applyLookDelta(dx, dy, sensMul) {
 // which drives camera.rotation.x/z directly).
 document.addEventListener('mousemove', (e) => {
   if (!state.pointerLocked || !state.localAlive) return;
-  applyLookDelta(e.movementX, e.movementY, state.mouseSensitivity);
+  applyLookDelta(e.movementX, e.movementY, state.aiming ? state.adsMouseSensitivity : state.mouseSensitivity);
 });
