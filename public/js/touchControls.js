@@ -250,14 +250,24 @@ function bindGrenade(el) {
   el.addEventListener('pointercancel', cancel); // a slipped thumb here must NOT complete the throw
 }
 
-// ---- Fullscreen + landscape lock + the controlsActive gate itself ----
-export async function engageTouchControls() {
-  try {
-    if (state.renderer?.domElement.requestFullscreen) await state.renderer.domElement.requestFullscreen();
-    if (screen.orientation?.lock) await screen.orientation.lock('landscape');
-  } catch { /* unsupported (iOS Safari has neither) — updateRotateOverlay() is the fallback */ }
+// ---- The controlsActive gate itself, plus best-effort fullscreen + landscape lock ----
+// Real bug found via a real-device report: this used to `await` requestFullscreen()/
+// orientation.lock() BEFORE setting controlsActive, inside a try/catch. That's safe against a
+// REJECTED promise (caught, execution continues) but not against one that never settles at all —
+// which is exactly what some mobile browsers/WebViews do for these APIs (silently unsupported,
+// not rejected) rather than throwing. The await then hangs forever, and controlsActive never
+// becomes true — matching precisely what was reported: the look-zone (which never checks
+// controlsActive) kept working, while movement/fire/grenade (which all gate on it) were
+// permanently dead. Fixed by making the actual "controls are live" step synchronous and
+// unconditional; fullscreen/orientation-lock are now a separate, fire-and-forget promise chain
+// that can fail or hang without blocking or delaying anything gameplay-relevant.
+export function engageTouchControls() {
   lockHint.hidden = true;
   state.controlsActive = true;
+  Promise.resolve()
+    .then(() => state.renderer?.domElement.requestFullscreen?.())
+    .then(() => screen.orientation?.lock?.('landscape'))
+    .catch(() => { /* unsupported (iOS Safari has neither) — updateRotateOverlay() is the fallback */ });
 }
 export function pauseTouchControls() {
   state.controlsActive = false;
