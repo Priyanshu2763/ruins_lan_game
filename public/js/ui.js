@@ -7,7 +7,7 @@ import { setFov } from './world.js';
 import { mountPreviewInto, resizePreview, setPreviewAppearance, startPreviewLoop, stopPreviewLoop } from './preview.js';
 import { CHARACTERS, SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, SLOTS, MODES, OPERATORS, CAN_STRIP_CLOTHES, sanitizeAppearance } from '/shared/appearance.js';
 import { isTouchDevice, setTouchOverride, getTouchOverride } from './touchDetect.js';
-import { enterCustomizeMode, resetTouchLayout } from './touchLayout.js';
+import { enterCustomizeMode, resetTouchLayout, setTouchLayoutUsername, applyServerTouchLayout } from './touchLayout.js';
 
 // ---------- DOM ----------
 const authScreen = document.getElementById('authScreen');
@@ -84,6 +84,7 @@ function showDashboard(username) {
   authScreen.hidden = true;
   dashboardScreen.hidden = false;
   myUsername = username;
+  setTouchLayoutUsername(username); // touch-control layout saves now sync to this account, not just this device
   dashAccountLabel.textContent = `Signed in as ${username}`;
   if (!nameInput.value) nameInput.value = username;
   loadProfile();
@@ -235,12 +236,40 @@ async function loadProfile() {
 
     myAppearance = sanitizeAppearance(data.appearance);
     setDraft(myAppearance);
+    applyServerTouchLayout(data.touchLayout); // no-ops (leaves the local/default layout alone) if the account never saved one
+    applyServerSettings(data.settings); // same no-op-if-null contract, see settings section below
     playPreviewName.textContent = data.username;
   } catch (err) {
     // Profile is a nice-to-have on the dashboard, not a gate on playing — a failed fetch just
     // leaves the stat cards at their placeholder '–' rather than blocking anything.
   }
 }
+
+// ---------- Mobile in-match stats overlay (touchControls.js's #tcStatsBtn) — the dashboard's own
+// Profile tab isn't reachable mid-match (the whole dashboard is hidden while #hud is showing), so
+// this is a small standalone fetch+display reusing the same /api/profile endpoint. ----------
+const statsOverlay = document.getElementById('statsOverlay');
+const msKills = document.getElementById('msKills');
+const msDeaths = document.getElementById('msDeaths');
+const msKD = document.getElementById('msKD');
+const msWins = document.getElementById('msWins');
+const msMatches = document.getElementById('msMatches');
+const statsCloseBtn = document.getElementById('statsCloseBtn');
+export async function showStatsOverlay() {
+  statsOverlay.hidden = false;
+  if (!myUsername) return;
+  try {
+    const res = await fetch(`/api/profile?username=${encodeURIComponent(myUsername)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) return;
+    msKills.textContent = data.kills;
+    msDeaths.textContent = data.deaths;
+    msKD.textContent = data.deaths > 0 ? (data.kills / data.deaths).toFixed(2) : data.kills.toFixed(2);
+    msWins.textContent = data.wins;
+    msMatches.textContent = data.matchesPlayed;
+  } catch (err) { /* leaves the placeholder '–' values, same tolerance as loadProfile() above */ }
+}
+statsCloseBtn.addEventListener('click', () => { statsOverlay.hidden = true; });
 
 // ---------- Closet: every option below is generated from the shared catalog (shared/appearance.js),
 // the same one the renderer and the server validate against, so the three can't disagree. ----------
@@ -406,8 +435,14 @@ renderCloset();
 
 // ---------- Settings tab: BGMI-style, grouped Sound/Sensitivity/Gameplay sections, every
 // control wired to a real mechanism (not a decorative stub) — see audio.js's music/sfx gain
-// split, world.js's setFov, and movement.js's toggle-sprint mode. All saved to localStorage,
-// per-device rather than per-account (deliberately separate from the DB-backed profile). ----------
+// split, world.js's setFov, and movement.js's toggle-sprint mode. Per-account now (DB, via
+// player_customization.settings — same JSONB-on-one-row pattern as appearance/touch_layout):
+// localStorage stays as an instant-available per-device cache (so a setting takes effect
+// immediately on `input`, and still has a value before login/loadProfile() resolves), but the
+// account's own saved copy — applied by applyServerSettings() from loadProfile() — wins once it
+// arrives, and every change is pushed back to the account via a debounced save so dragging a
+// slider doesn't spam the API on every pixel of movement. forceTouchUI is the one exception,
+// deliberately excluded — see shared/settings.js's own comment on why. ----------
 const masterVolumeInput = document.getElementById('masterVolumeInput');
 const masterVolumeVal = document.getElementById('masterVolumeVal');
 const musicVolumeInput = document.getElementById('musicVolumeInput');
@@ -419,6 +454,75 @@ const mouseSensVal = document.getElementById('mouseSensVal');
 const fovInput = document.getElementById('fovInput');
 const fovVal = document.getElementById('fovVal');
 const sprintModeToggle = document.getElementById('sprintModeToggle');
+const touchSensInput = document.getElementById('touchSensInput');
+const touchSensVal = document.getElementById('touchSensVal');
+
+let settingsSyncTimer = null;
+function syncSettingsToServer() {
+  if (!myUsername) return; // not logged in yet (or a guest) — nothing to save against
+  clearTimeout(settingsSyncTimer);
+  settingsSyncTimer = setTimeout(() => {
+    const settings = {
+      masterVolume: Number(masterVolumeInput.value),
+      musicVolume: Number(musicVolumeInput.value),
+      sfxVolume: Number(sfxVolumeInput.value),
+      mouseSensitivity: Number(mouseSensInput.value),
+      fov: Number(fovInput.value),
+      toggleSprint: state.toggleSprint,
+      touchLookSensitivity: Number(touchSensInput.value),
+    };
+    fetch('/api/customization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: myUsername, settings }),
+    }).catch(() => {}); // best-effort — localStorage already has the value either way
+  }, 600);
+}
+
+// Applied once per login from loadProfile(); null (nothing saved yet for this account) is a
+// deliberate no-op, leaving whatever loadSettings() already put on screen from localStorage.
+function applyServerSettings(settings) {
+  if (!settings) return;
+  masterVolumeInput.value = settings.masterVolume;
+  masterVolumeVal.textContent = `${settings.masterVolume}%`;
+  setMasterVolume(settings.masterVolume / 100);
+
+  musicVolumeInput.value = settings.musicVolume;
+  musicVolumeVal.textContent = `${settings.musicVolume}%`;
+  setMusicVolume(settings.musicVolume / 100);
+
+  sfxVolumeInput.value = settings.sfxVolume;
+  sfxVolumeVal.textContent = `${settings.sfxVolume}%`;
+  setSfxVolume(settings.sfxVolume / 100);
+
+  mouseSensInput.value = settings.mouseSensitivity;
+  mouseSensVal.textContent = `${settings.mouseSensitivity}%`;
+  state.mouseSensitivity = settings.mouseSensitivity / 100;
+
+  fovInput.value = settings.fov;
+  fovVal.textContent = `${settings.fov}°`;
+  setFov(settings.fov);
+
+  state.toggleSprint = settings.toggleSprint;
+  state.sprintToggledOn = false;
+  sprintModeToggle.textContent = settings.toggleSprint ? 'TOGGLE' : 'HOLD';
+  sprintModeToggle.classList.toggle('on', settings.toggleSprint);
+  sprintModeToggle.classList.toggle('off', !settings.toggleSprint);
+
+  touchSensInput.value = settings.touchLookSensitivity;
+  touchSensVal.textContent = `${settings.touchLookSensitivity}%`;
+  state.touchLookSensitivity = settings.touchLookSensitivity / 100;
+
+  // Keep the localStorage cache in step too, so the next page load (before loadProfile()
+  // resolves) starts from this account's real values instead of stale/default local ones.
+  localStorage.setItem('ruins_masterVolume', String(settings.masterVolume));
+  localStorage.setItem('ruins_musicVolume', String(settings.musicVolume));
+  localStorage.setItem('ruins_sfxVolume', String(settings.sfxVolume));
+  localStorage.setItem('ruins_mouseSensitivity', String(settings.mouseSensitivity));
+  localStorage.setItem('ruins_fov', String(settings.fov));
+  localStorage.setItem('ruins_toggleSprint', settings.toggleSprint ? '1' : '0');
+  localStorage.setItem('ruins_touchLookSensitivity', String(settings.touchLookSensitivity));
+}
 
 function loadSettings() {
   const readPct = (key, fallback) => {
@@ -446,6 +550,9 @@ function loadSettings() {
   sprintModeToggle.textContent = toggleSprint ? 'TOGGLE' : 'HOLD';
   sprintModeToggle.classList.toggle('on', toggleSprint);
   sprintModeToggle.classList.toggle('off', !toggleSprint);
+
+  const touchSens = readPct('ruins_touchLookSensitivity', 100);
+  touchSensInput.value = touchSens; touchSensVal.textContent = `${touchSens}%`; state.touchLookSensitivity = touchSens / 100;
 }
 loadSettings();
 
@@ -454,30 +561,35 @@ masterVolumeInput.addEventListener('input', () => {
   masterVolumeVal.textContent = `${vol}%`;
   setMasterVolume(vol / 100);
   localStorage.setItem('ruins_masterVolume', String(vol));
+  syncSettingsToServer();
 });
 musicVolumeInput.addEventListener('input', () => {
   const vol = Number(musicVolumeInput.value);
   musicVolumeVal.textContent = `${vol}%`;
   setMusicVolume(vol / 100);
   localStorage.setItem('ruins_musicVolume', String(vol));
+  syncSettingsToServer();
 });
 sfxVolumeInput.addEventListener('input', () => {
   const vol = Number(sfxVolumeInput.value);
   sfxVolumeVal.textContent = `${vol}%`;
   setSfxVolume(vol / 100);
   localStorage.setItem('ruins_sfxVolume', String(vol));
+  syncSettingsToServer();
 });
 mouseSensInput.addEventListener('input', () => {
   const sens = Number(mouseSensInput.value);
   mouseSensVal.textContent = `${sens}%`;
   state.mouseSensitivity = sens / 100;
   localStorage.setItem('ruins_mouseSensitivity', String(sens));
+  syncSettingsToServer();
 });
 fovInput.addEventListener('input', () => {
   const fov = Number(fovInput.value);
   fovVal.textContent = `${fov}°`;
   setFov(fov);
   localStorage.setItem('ruins_fov', String(fov));
+  syncSettingsToServer();
 });
 sprintModeToggle.addEventListener('click', () => {
   const toggleSprint = !state.toggleSprint;
@@ -487,14 +599,15 @@ sprintModeToggle.addEventListener('click', () => {
   sprintModeToggle.classList.toggle('on', toggleSprint);
   sprintModeToggle.classList.toggle('off', !toggleSprint);
   localStorage.setItem('ruins_toggleSprint', toggleSprint ? '1' : '0');
+  syncSettingsToServer();
 });
 
 // ---------- Settings tab: Touch Controls section — always visible (not just on detected touch
 // devices) specifically so the Force-Touch-UI override is discoverable on a hybrid touchscreen
-// laptop that auto-detected as desktop, or vice versa. Mirrors the mouseSensInput wiring pattern
-// exactly (same localStorage-per-device convention). ----------
-const touchSensInput = document.getElementById('touchSensInput');
-const touchSensVal = document.getElementById('touchSensVal');
+// laptop that auto-detected as desktop, or vice versa. touchSensInput itself is wired above
+// (it's now part of the synced settings object); forceTouchUI stays localStorage-only per device
+// (see shared/settings.js), and the layout buttons stay their own DB-backed system
+// (touchLayout.js) — neither belongs in the settings sync above. ----------
 const forceTouchToggle = document.getElementById('forceTouchToggle');
 const customizeTouchBtn = document.getElementById('customizeTouchBtn');
 const resetTouchBtn = document.getElementById('resetTouchBtn');
@@ -515,16 +628,12 @@ forceTouchToggle.addEventListener('click', () => {
   refreshForceTouchToggle();
 });
 
-const touchSens = (() => {
-  const saved = localStorage.getItem('ruins_touchLookSensitivity');
-  return saved !== null ? Number(saved) : 100;
-})();
-touchSensInput.value = touchSens; touchSensVal.textContent = `${touchSens}%`; state.touchLookSensitivity = touchSens / 100;
 touchSensInput.addEventListener('input', () => {
   const sens = Number(touchSensInput.value);
   touchSensVal.textContent = `${sens}%`;
   state.touchLookSensitivity = sens / 100;
   localStorage.setItem('ruins_touchLookSensitivity', String(sens));
+  syncSettingsToServer();
 });
 
 customizeTouchBtn.addEventListener('click', () => enterCustomizeMode());
@@ -698,19 +807,45 @@ let everLocked = false; // first-ever lock shows the plain "click to enter" hint
 // to trigger it at that point) the same way lockHint/resumeBtn already do internally here.
 export function requestLock() { state.renderer.domElement.requestPointerLock(); }
 
-// Touch has no Pointer Lock equivalent at all — engageTouchControls()/resumeTouchControls()
-// (touchControls.js) are what actually flip state.controlsActive and hide/show lockHint/pauseMenu
-// on a touch device. touchControls.js registers them here via registerTouchLockHandlers instead of
-// this file importing touchControls.js directly, to avoid a circular import (touchControls.js
-// already needs to import lockHint/pauseMenu/openChat/closeChat FROM this file — see below).
-let touchEngage = null, touchResume = null;
-export function registerTouchLockHandlers(engage, resume) { touchEngage = engage; touchResume = resume; }
+// Touch has no Pointer Lock equivalent at all. A REAL bug found via a real-device report: this
+// used to delegate the ENTIRE touch-engage step to touchControls.js via a registered callback
+// (touchEngage), falling back to desktop's requestLock() if that callback wasn't registered yet.
+// That fallback is exactly the trap — touchControls.js registers its callback at module-evaluation
+// time, and on a slower device (real phone JS parse/network vs this dev machine) a tap could
+// easily arrive before that registration finished, silently routing a touch tap into
+// requestPointerLock() (which does nothing useful, and often nothing visible, on a touchscreen)
+// instead of ever engaging touch controls at all — matching precisely "the overlay never
+// disappears". Fixed by making the CRITICAL step (hide the overlay, flip controlsActive) live
+// directly here, with zero dependency on any other module's load timing; touchControls.js's own
+// registered callback is now purely an optional bonus (fullscreen + landscape-lock), called if
+// and when it happens to be available, never required for the game to actually start.
+let touchEngageExtra = null, touchResumeExtra = null;
+export function registerTouchLockHandlers(engage, resume) { touchEngageExtra = engage; touchResumeExtra = resume; }
 
 if (isTouchDevice()) lockHint.textContent = 'Tap to enter — touch controls';
-lockHint.addEventListener('click', () => { if (isTouchDevice() && touchEngage) touchEngage(); else requestLock(); });
-resumeBtn.addEventListener('click', () => { if (isTouchDevice() && touchResume) touchResume(); else requestLock(); });
+lockHint.addEventListener('click', () => {
+  if (isTouchDevice()) {
+    lockHint.hidden = true;
+    state.controlsActive = true;
+    touchEngageExtra?.(); // best-effort fullscreen/orientation-lock, if touchControls.js has registered by now
+  } else {
+    requestLock();
+  }
+});
+resumeBtn.addEventListener('click', () => {
+  if (isTouchDevice()) {
+    pauseMenu.hidden = true;
+    state.controlsActive = true;
+    touchResumeExtra?.();
+  } else {
+    requestLock();
+  }
+});
 pauseControlsBtn.addEventListener('click', () => { pauseMenu.hidden = true; controlsOpenedFromPause = true; controlsModal.hidden = false; });
 const pauseCustomizeBtn = document.getElementById('pauseCustomizeBtn');
+// Real bug: this was unconditionally visible in the static markup — "Edit Touch Controls" makes
+// no sense on a desktop session with no touch controls to edit at all.
+pauseCustomizeBtn.hidden = !isTouchDevice();
 pauseCustomizeBtn.addEventListener('click', () => { pauseMenu.hidden = true; enterCustomizeMode(); });
 quitBtn.addEventListener('click', () => leaveMatchAndReload());
 

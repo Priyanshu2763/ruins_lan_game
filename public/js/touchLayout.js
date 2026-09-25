@@ -1,8 +1,9 @@
-// Default positions, persistence, and edit-mode dragging for the touch-control layout. Deliberately
-// minimal imports (just state.js) — same "safe for anything to depend on with zero circular-import
-// risk" reasoning net.js already documents for itself. touchControls.js builds the actual control
-// elements and calls makeDraggable() on each one; this file never reaches into touchControls.js.
+// Default positions, persistence, and edit-mode dragging for the touch-control layout.
+// touchControls.js builds the actual control elements and calls makeDraggable() on each one;
+// this file never reaches into touchControls.js.
 import { state } from './state.js';
+import { DEFAULT_TOUCH_LAYOUT, sanitizeTouchLayout } from '/shared/touchLayout.js';
+export { DEFAULT_TOUCH_LAYOUT };
 
 // Every control's position is an anchor corner ('bl'/'br'/'tl'/'tr') + an {x,y} offset in CSS
 // pixels from that corner — not raw absolute coordinates, so the layout scales sanely across
@@ -12,18 +13,8 @@ import { state } from './state.js';
 // Arrangement mirrors BGMI's default HUD: joystick bottom-left, fire (large) bottom-right, the
 // rest of the action cluster fanned around it, free-look drag zone implied by lookZoneLeftPct
 // (everything right of that % of the viewport width, excluding the buttons themselves).
-export const DEFAULT_TOUCH_LAYOUT = {
-  joystick:     { anchor: 'bl', x: 95,  y: 110 },
-  fire:         { anchor: 'br', x: 70,  y: 95 },
-  jump:         { anchor: 'br', x: 165, y: 165 },
-  crouch:       { anchor: 'br', x: 165, y: 80 },  // tap = crouch, double-tap = prone
-  reload:       { anchor: 'br', x: 70,  y: 200 },
-  weaponSwitch: { anchor: 'br', x: 225, y: 55 },
-  grenade:      { anchor: 'br', x: 225, y: 165 },
-  lookZoneLeftPct: 34, // left edge of the free-look drag zone, as a % of viewport width
-};
-
-const KEY = 'ruins_touchLayout';
+const KEY = 'ruins_touchLayout'; // per-device instant cache — the DB (per-account) is the real
+                                  // source of truth once logged in, see setTouchLayoutUsername below
 
 export function loadTouchLayout() {
   try {
@@ -34,8 +25,38 @@ export function loadTouchLayout() {
   }
 }
 
+// Fires the actual network save. Fire-and-forget by design (same philosophy as every other
+// touch-related network call in this file) — a failed/slow save never blocks or delays gameplay,
+// it just means the drag falls back to being device-local (localStorage still has it) until the
+// next successful sync.
+let username = null;
+export function setTouchLayoutUsername(name) { username = name; }
+function syncToServer(layout) {
+  if (!username) return;
+  fetch('/api/customization', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, touchLayout: layout }),
+  }).catch(() => { /* offline/server hiccup — localStorage already has it, will retry on next drag */ });
+}
+
+// Called once from ui.js's loadProfile() when the server's saved layout comes back (login, or the
+// dashboard's Character/Profile tab refreshing) — this is the actual per-account sync: a player's
+// layout now follows their account across devices, not just the one browser that dragged it.
+export function applyServerTouchLayout(layout) {
+  if (!layout) return;
+  liveLayout = sanitizeTouchLayout(layout);
+  saveTouchLayout(liveLayout); // keep the local cache in sync too, for the next instant page load
+  for (const [key, el] of registry) applyPosition(el, key);
+  const zone = document.getElementById('tcLookZone');
+  if (zone) zone.style.left = `${liveLayout.lookZoneLeftPct}%`;
+  const handle = document.getElementById('tcLookZoneHandle');
+  if (handle) handle.style.left = `${liveLayout.lookZoneLeftPct}%`;
+}
+
 function saveTouchLayout(layout) {
-  try { localStorage.setItem(KEY, JSON.stringify(layout)); } catch { /* storage unavailable — layout just won't persist */ }
+  try { localStorage.setItem(KEY, JSON.stringify(layout)); } catch { /* storage unavailable — layout just won't persist locally */ }
+  syncToServer(layout);
 }
 
 // Live in-memory layout + element registry, populated incrementally as touchControls.js calls
@@ -146,6 +167,15 @@ export function enterCustomizeMode() {
 }
 export function exitCustomizeMode() {
   state.touchCustomizing = false;
+  // Real bug found via user report: customize mode was reachable from the pause menu, whose OWN
+  // "Edit Touch Controls" button already set state.controlsActive = false as part of pausing (see
+  // touchControls.js's pauseTouchControls). Nothing on the way back OUT restored it — exiting via
+  // Done left controls genuinely dead (movement/fire both gate on controlsActive) until the player
+  // separately paused and resumed again, which is exactly what was reported. Setting it true here
+  // is safe in every entry path: from the pause menu it correctly un-pauses; from the dashboard's
+  // Settings tab (no match running) it's a harmless no-op, since nothing reads it meaningfully
+  // outside an active match's render loop.
+  state.controlsActive = true;
   const root = document.getElementById('touchControls');
   if (root) root.classList.remove('tcCustomizing');
   const done = document.getElementById('tcDoneBtn');

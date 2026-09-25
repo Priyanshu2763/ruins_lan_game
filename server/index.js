@@ -8,6 +8,8 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { pool } from './db.js';
 import { sanitizeAppearance } from '../shared/appearance.js';
+import { sanitizeTouchLayout } from '../shared/touchLayout.js';
+import { sanitizeSettings } from '../shared/settings.js';
 import {
   WEAPONS, MAX_HEALTH, RESPAWN_MS, MAX_PLAYERS_PER_ROOM, SPAWN_POINTS, SPAWN_SAFE_DIST,
   PRONE_HEAD_OFFSET, HEAD_CENTER_Y, HEAD_HALF, CROUCH_SCALE_Y, PLAYER_RADIUS, getMapLayout,
@@ -131,7 +133,7 @@ app.get('/api/profile', async (req, res) => {
     if (!user) return res.status(404).json({ ok: false, error: 'No such account.' });
     const [statsRes, custRes] = await Promise.all([
       pool.query('SELECT kills, deaths, matches_played, wins FROM player_stats WHERE user_id = $1', [user.id]),
-      pool.query('SELECT appearance FROM player_customization WHERE user_id = $1', [user.id]),
+      pool.query('SELECT appearance, touch_layout, settings FROM player_customization WHERE user_id = $1', [user.id]),
     ]);
     const stats = statsRes.rows[0] || { kills: 0, deaths: 0, matches_played: 0, wins: 0 };
     const cust = custRes.rows[0] || {};
@@ -144,6 +146,12 @@ app.get('/api/profile', async (req, res) => {
       wins: stats.wins,
       memberSince: user.created_at,
       appearance: sanitizeAppearance(cust.appearance),
+      // null (not sanitized-to-defaults) when nothing's been saved yet, so the client can tell
+      // "no account layout/settings exist" apart from "the account's data happens to equal the
+      // defaults" — applyServerTouchLayout()/applyServerSettings() in the client treat null as a
+      // no-op, leaving whatever's already in localStorage/on screen alone.
+      touchLayout: cust.touch_layout || null,
+      settings: cust.settings || null,
     });
   } catch (err) {
     console.error('profile fetch failed:', err);
@@ -151,22 +159,38 @@ app.get('/api/profile', async (req, res) => {
   }
 });
 
+// Saves ANY subset of appearance, touch-control layout, and settings — the character closet,
+// the touch-control edit mode, and the Settings tab all call this same endpoint independently,
+// so none of them should ever require/overwrite either of the others' data. COALESCE against the
+// existing row's own column is what makes a partial save ("just settings this time") leave the
+// other fields untouched instead of nulling them out.
 app.post('/api/customization', async (req, res) => {
-  const { username, appearance } = req.body || {};
-  if (!isValidUsername(username) || !appearance || typeof appearance !== 'object') {
+  const { username, appearance, touchLayout, settings } = req.body || {};
+  if (!isValidUsername(username) || (!appearance && !touchLayout && !settings)) {
     return res.status(400).json({ ok: false, error: 'Invalid customization data.' });
   }
-  const clean = sanitizeAppearance(appearance);
+  const cleanAppearance = appearance && typeof appearance === 'object' ? sanitizeAppearance(appearance) : null;
+  const cleanLayout = touchLayout && typeof touchLayout === 'object' ? sanitizeTouchLayout(touchLayout) : null;
+  const cleanSettings = settings && typeof settings === 'object' ? sanitizeSettings(settings) : null;
   try {
     const user = await getUserByUsername(username);
     if (!user) return res.status(404).json({ ok: false, error: 'No such account.' });
     await pool.query(
-      `INSERT INTO player_customization (user_id, appearance, updated_at)
-       VALUES ($1, $2, now())
-       ON CONFLICT (user_id) DO UPDATE SET appearance = $2, updated_at = now()`,
-      [user.id, JSON.stringify(clean)]
+      `INSERT INTO player_customization (user_id, appearance, touch_layout, settings, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (user_id) DO UPDATE SET
+         appearance = COALESCE($2, player_customization.appearance),
+         touch_layout = COALESCE($3, player_customization.touch_layout),
+         settings = COALESCE($4, player_customization.settings),
+         updated_at = now()`,
+      [
+        user.id,
+        cleanAppearance ? JSON.stringify(cleanAppearance) : null,
+        cleanLayout ? JSON.stringify(cleanLayout) : null,
+        cleanSettings ? JSON.stringify(cleanSettings) : null,
+      ]
     );
-    res.json({ ok: true, appearance: clean });
+    res.json({ ok: true, appearance: cleanAppearance, touchLayout: cleanLayout, settings: cleanSettings });
   } catch (err) {
     console.error('customization save failed:', err);
     res.status(500).json({ ok: false, error: 'Server error.' });

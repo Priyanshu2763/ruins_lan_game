@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { FLOOR, getMapLayout, MAPS, DEFAULT_MAP } from '/shared/gameData.js';
 import { state } from './state.js';
+import { isTouchDevice } from './touchDetect.js';
 
 const gameContainer = document.getElementById('gameContainer');
 
@@ -544,6 +545,15 @@ export function initScene(mapKey, memeMode) {
   state.renderer = new THREE.WebGLRenderer({ antialias: false });
   state.renderer.setPixelRatio(1);
   state.renderer.setSize(window.innerWidth, window.innerHeight);
+  // A little brighter on mobile specifically (phone screens are commonly viewed in brighter
+  // ambient light / at lower backlight brightness than a monitor, and the request was explicit)
+  // — toneMappingExposure is a single global multiplier on the whole rendered image, so this
+  // doesn't need touching any of the per-theme light intensities below at all, and is a no-op on
+  // desktop (default NoToneMapping otherwise, unchanged from before this).
+  if (isTouchDevice()) {
+    state.renderer.toneMapping = THREE.LinearToneMapping;
+    state.renderer.toneMappingExposure = 1.18;
+  }
   gameContainer.appendChild(state.renderer.domElement);
 
   // bright lighting either way — high sun for day, a warmer/lower-angled one for dusk — both

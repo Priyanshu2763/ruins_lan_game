@@ -17,7 +17,12 @@
      opening Controls from the pause menu put the (still-rendering) canvas on top of it,
      swallowing every click and making the game look "stuck". */
   #hud { z-index: 1; }
-  #lockHint { z-index: 2; }
+  #lockHint { z-index: 5; } /* must beat #touchControls's z-index:3 — a real bug found via user
+    report: with lockHint at 2, touchControls' own look-zone sat ON TOP of it, so a real tap on
+    "Tap to enter" was actually hitting the look-zone underneath and never reaching lockHint's
+    click handler at all. Not caught by this project's own headless testing because that test
+    called lockHint.click() programmatically, which bypasses real hit-testing/stacking order
+    entirely — a real gap in the verification method, not just the code. */
   .screen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, #2a2620 0%, #0d0c0a 100%); z-index: 10; }
   #scoreboard { z-index: 5; }
   .panel { width: 420px; max-width: 92vw; background: rgba(20,18,14,0.9); border: 1px solid #4a4232; border-radius: 8px; padding: 28px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
@@ -322,6 +327,8 @@
   #chatInput { position: absolute; left: 16px; bottom: 96px; width: 360px; margin: 0; pointer-events: auto; background: rgba(12,11,8,0.92); border-color: #b3924a; }
   /* "Rejoin your match?" — shown after a refresh instead of dropping the player straight back in. */
   #rejoinPrompt { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(6,5,3,0.78); }
+  #statsOverlay { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(6,5,3,0.78); }
+  #statsOverlay .ctlTable td:last-child { color: #e8c65a; font-weight: 700; text-align: right; }
   #rejoinPrompt .rejoinBox { width: min(420px, 92vw); padding: 26px 28px 22px; border-radius: 10px; background: rgba(20,18,14,0.97); border: 1px solid #b3924a; box-shadow: 0 12px 48px rgba(0,0,0,0.7); text-align: center; }
   #rejoinPrompt h2 { margin: 0 0 8px; color: #e8c65a; font-size: 20px; letter-spacing: 1px; text-transform: uppercase; }
   #rejoinPrompt p { margin: 0 0 6px; color: #d8d0b8; font-size: 14px; line-height: 1.45; }
@@ -337,7 +344,13 @@
      above, and the reason "optimized/smallest" doesn't cost anything extra here. Palette reused
      exactly from the existing HUD (rgba(20,18,14,...) fill, #4a4232 border, #d8c98a text) so
      these read as part of the same interface, not a bolted-on control scheme. */
-  #touchControls { position: fixed; inset: 0; z-index: 3; touch-action: none; }
+  /* pointer-events:none on the CONTAINER itself, auto on its children — a real bug found by
+     testing: without this, the container's OWN body (not just its children) intercepted taps
+     across its entire inset:0 area, including patches with no covering child element (like the
+     top HUD strip the look-zone now deliberately excludes) — a tap there was landing on
+     #touchControls itself instead of passing through to #weaponBar underneath. This lets any
+     area with nothing purpose-built on top of it fall through to whatever's actually there. */
+  #touchControls { position: fixed; inset: 0; z-index: 3; touch-action: none; pointer-events: none; }
   #touchControls > * { pointer-events: auto; }
   .tcBtn { position: absolute; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.72);
     display: flex; align-items: center; justify-content: center; font: 700 11px system-ui, sans-serif;
@@ -347,13 +360,29 @@
   #tcFire { background: rgba(60,18,18,0.55); }
   .tcBtnSm { width: 54px; height: 54px; }
   .tcJumpIcon::before { content: ''; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 12px solid #d8c98a; }
+  /* Grenade count badge (#tcGrenadeBadge, kept in sync by weapons.js's updateWeaponBar) — replaces
+     the separate weapon-bar grenade card on mobile per the explicit ask ("just write the count in
+     the grenade button"). .tcGrenadeEquipped is a visual cue while a grenade is in-hand
+     (equipGrenadeMobile), toggled in touchControls.js — not asked for explicitly, but "in hand
+     and ready" is otherwise invisible state with nothing else on screen showing it. */
+  #tcGrenadeBadge { position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 8px; background: #3a2f1a; border: 1px solid #b3924a; color: #e8c65a; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  #tcGrenade.tcGrenadeEquipped { border-color: #e8c65a; background: rgba(58,47,26,0.85); box-shadow: 0 0 8px rgba(232,198,90,0.5); }
   .tcJoystickBase { position: absolute; width: 120px; height: 120px; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.55); touch-action: none; }
   .tcJoystickKnob { position: absolute; top: 50%; left: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%; background: rgba(216,201,138,0.85); transition: transform 0.03s linear; pointer-events: none; }
-  #tcLookZone { position: absolute; top: 0; right: 0; bottom: 0; touch-action: none; }
+  /* top:145px, not 0 — a real bug found by testing: the look-zone otherwise sits (in z-order)
+     above #weaponBar, which is trapped inside #hud's own, LOWER stacking context (#hud has its
+     own z-index, so nothing inside it can out-rank #touchControls just by setting its own
+     z-index higher — the whole #hud subtree is capped at #hud's context). A tap on a weapon
+     card was landing on the look-zone underneath it instead. Excluding the HUD-chrome strip at
+     the top (weapon bar + kill feed live there) from the drag-to-look area fixes it — matching
+     how BGMI's own look zone works too: it doesn't cover the HUD, only the actual play area. */
+  #tcLookZone { position: absolute; top: 145px; right: 0; bottom: 0; touch-action: none; }
   #tcLookZoneHandle { position: absolute; top: 0; bottom: 0; width: 14px; margin-left: -7px; touch-action: none; cursor: ew-resize; }
   .tcCustomizing #tcLookZoneHandle { background: rgba(232,198,90,0.25); border-left: 1px dashed #e8c65a; border-right: 1px dashed #e8c65a; }
-  #tcPauseBtn, #tcChatBtn { position: absolute; width: 40px; height: 40px; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.72); color: #d8c98a; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+  #tcPauseBtn, #tcChatBtn, #tcFullscreenBtn, #tcStatsBtn { position: absolute; width: 40px; height: 40px; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.72); color: #d8c98a; font-size: 16px; display: flex; align-items: center; justify-content: center; }
   #tcPauseBtn { top: 12px; right: 12px; } /* top-right, out of the way of the joystick/fire cluster and the minimap */
+  #tcFullscreenBtn { top: 12px; right: 60px; } /* left of the pause button — always reachable, since re-entering fullscreen needs a direct tap (see toggleFullscreen's comment) */
+  #tcStatsBtn { top: 12px; left: 50%; transform: translateX(-50%); } /* top-middle, per the explicit ask — #tcDoneBtn shares this exact spot but the two are never visible at once (Done only shows during customize mode, which blocks the stats button entirely) */
   #tcChatBtn { top: 128px; left: 10px; } /* directly under the mobile-shrunk minimap's box (top:10px + height:110px + gap, see @media below) */
   #tcDoneBtn { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); padding: 8px 22px; border-radius: 6px; border: 1px solid #b3924a; background: rgba(42,36,20,0.95); color: #e8c65a; font-weight: 700; z-index: 4; }
   .tcCustomizing .tcBtn, .tcCustomizing .tcJoystickBase { outline: 2px dashed #e8c65a; outline-offset: 2px; }
@@ -385,11 +414,33 @@
     #roomTag { display: none; } /* not critical during play; the dashboard already shows room info, and this column has no room to spare */
     #chatLog { top: 132px; left: 6px; bottom: auto; width: 190px; max-height: 55px; }
     #chatInput { top: 132px; left: 6px; bottom: auto; width: 190px; }
-    #healthWrap { left: 6px; top: 193px; bottom: auto; width: 160px; }
-    #weaponBar { right: 16px; bottom: 260px; gap: 6px; }
-    .weaponCard { width: 68px; padding: 6px 4px; }
-    .weaponCard .wImg { max-width: 56px; max-height: 26px; }
-    #killFeed { top: 10px; right: 60px; width: 190px; font-size: 11px; }
+    /* BGMI puts the HP bar bottom-CENTER, not stacked in the left column with everything else —
+       moved here specifically per that reference, clear of both the joystick (left) and the
+       fire/action cluster (right) with margin on a typical phone landscape width. */
+    #healthWrap { left: 50%; top: auto; bottom: 12px; transform: translateX(-50%); width: 200px; text-align: center; }
+    #healthLabel { display: none; } /* redundant once centered/compact — the bar itself is self-explanatory */
+    /* BGMI-style tap-a-card weapon switching (touchControls.js's bindWeaponCards) replaces the old
+       "SWP" cycle button entirely, so the row can shrink further now that it's the only
+       weapon-switch control. The grenade card is hidden here specifically — its count moved to a
+       badge directly on the touch grenade button instead (#tcGrenadeBadge below), per the explicit
+       ask to not show it as a 5th card on mobile. */
+    /* pointer-events:auto — the REAL fix for weapon cards never receiving taps at all. #hud (its
+       ancestor) has pointer-events:none by design on desktop (nothing there was ever meant to be
+       clickable, all input is mouse/keyboard-global) — .weaponCard inherits that none, so
+       bindWeaponCards()'s delegated listener silently never fired. Scoped strictly inside this
+       @media block so desktop's #hud stays exactly as inert as it's always been; only mobile
+       opts back into real clicks here. */
+    #weaponBar { right: 16px; bottom: 260px; gap: 5px; pointer-events: auto; }
+    #weaponBar #grenadeCard { display: none; }
+    .weaponCard { width: 52px; padding: 4px 3px; }
+    .weaponCard .wImg { max-width: 42px; max-height: 20px; }
+    .weaponCard .wIcon { height: 24px; margin-bottom: 2px; }
+    .weaponCard .wName { font-size: 8px; }
+    .weaponCard .wAmmo { font-size: 11px; margin-top: 1px; } /* shrunk, but still legible -- the explicit ask was "bullet count should be visible" */
+    .weaponCard .wKey { display: none; } /* the "1/2/3/4" desktop keybind hint is meaningless on a tap-to-switch card */
+    /* Moved from the top-right corner to the left column, directly below chat — the same general
+       area chat messages appear in, per the explicit ask, rather than off in its own corner. */
+    #killFeed { top: 195px; left: 6px; right: auto; bottom: auto; width: 190px; text-align: left; font-size: 11px; }
     #chatHint { display: none; } /* touch has its own #tcChatBtn instead of an Enter-key hint */
     #pickupToast { bottom: 170px; }
   }
@@ -650,6 +701,25 @@
   </div>
 </div>
 <div id="connOverlay" hidden><span class="connSpin"></span><span id="connText">Reconnecting...</span></div>
+
+<!-- Mobile-only in-match stats — dashboard's own Profile tab isn't reachable mid-match (the
+     dashboard itself is hidden while playing), so this is a small standalone overlay fetching the
+     same /api/profile data, opened via #tcStatsBtn (touchControls.js). -->
+<div id="statsOverlay" hidden>
+  <div class="rejoinBox" style="width:min(320px,88vw);">
+    <h2>Your Stats</h2>
+    <table class="ctlTable">
+      <tbody>
+        <tr><td>Kills</td><td id="msKills">–</td></tr>
+        <tr><td>Deaths</td><td id="msDeaths">–</td></tr>
+        <tr><td>K/D</td><td id="msKD">–</td></tr>
+        <tr><td>Wins</td><td id="msWins">–</td></tr>
+        <tr><td>Matches</td><td id="msMatches">–</td></tr>
+      </tbody>
+    </table>
+    <button id="statsCloseBtn" class="btn-secondary" style="width:100%;margin-top:12px;">Close</button>
+  </div>
+</div>
 
 <div id="gameContainer" hidden></div>
 

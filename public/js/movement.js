@@ -95,7 +95,7 @@ const PLAYER_HEIGHT = 1.8; // approximate vertical extent used only for collisio
 let yVel = 0, jumpOffset = 0;
 
 export function tryJump() {
-  if (state.isProne) return;
+  if (state.isProne || state.isCrouched) return; // no crouch-jumping — shared by both input paths, PC and mobile
   if (jumpOffset === 0 && yVel === 0) yVel = JUMP_VEL;
 }
 

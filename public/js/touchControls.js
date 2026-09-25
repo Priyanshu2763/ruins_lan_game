@@ -6,12 +6,14 @@
 // applyLookDelta) directly — no synthesized KeyboardEvent/MouseEvent anywhere, so there is no
 // second copy of any gameplay logic to keep in sync with the desktop path.
 import { state } from './state.js';
-import { WEAPONS } from '/shared/gameData.js';
 import { isTouchDevice } from './touchDetect.js';
 import { tryJump, setStance, applyLookDelta } from './movement.js';
-import { startFireSequence, stopFiring, reload, setWeapon, getCurrentWeaponIndex, startGrenadeAim, releaseGrenadeThrow, cancelGrenadeAim } from './weapons.js';
+import {
+  startFireSequence, stopFiring, reload, setWeapon, cancelGrenadeAim,
+  equipGrenadeMobile, startAimingThrowMobile, releaseGrenadeThrow, cancelGrenadeEquipMobile, isGrenadeEquippedMobile,
+} from './weapons.js';
 import { isGrenadeBusy } from './viewmodel.js';
-import { lockHint, pauseMenu, openChat, closeChat, registerTouchLockHandlers } from './ui.js';
+import { pauseMenu, openChat, closeChat, registerTouchLockHandlers, showStatsOverlay } from './ui.js';
 import { loadTouchLayout, makeDraggable, makeLookZoneHandleDraggable, getLookZoneLeftPct, exitCustomizeMode } from './touchLayout.js';
 
 if (isTouchDevice()) buildTouchControls();
@@ -45,28 +47,36 @@ function buildTouchControls() {
   makeDraggable(joyBase, 'joystick');
   bindJoystick(joyBase, joyKnob);
 
-  // ---- Action buttons ----
+  // ---- Action buttons ---- (no weapon-switch button — see the weapon-card tap handler below,
+  // which replaces it with real BGMI-style tap-a-card switching on the existing #weaponBar)
   const fireBtn = makeButton('tcFire', 'tcBtnLg', 'FIRE');
   const jumpBtn = makeButton('tcJump', 'tcBtnSm', '');
   jumpBtn.classList.add('tcJumpIcon');
   const crouchBtn = makeButton('tcCrouch', 'tcBtnSm', 'CR');
+  const proneBtn = makeButton('tcProne', 'tcBtnSm', 'PR');
   const reloadBtn = makeButton('tcReload', 'tcBtnSm', 'RLD');
-  const weaponBtn = makeButton('tcWeaponSwitch', 'tcBtnSm', 'SWP');
   const grenadeBtn = makeButton('tcGrenade', 'tcBtnSm', 'GRN');
-  [fireBtn, jumpBtn, crouchBtn, reloadBtn, weaponBtn, grenadeBtn].forEach((el) => root.appendChild(el));
+  const grenadeBadge = document.createElement('span');
+  grenadeBadge.id = 'tcGrenadeBadge';
+  grenadeBtn.appendChild(grenadeBadge); // count shown here instead of a separate weapon-bar card, see below
+  [fireBtn, jumpBtn, crouchBtn, proneBtn, reloadBtn, grenadeBtn].forEach((el) => root.appendChild(el));
   makeDraggable(fireBtn, 'fire');
   makeDraggable(jumpBtn, 'jump');
   makeDraggable(crouchBtn, 'crouch');
+  makeDraggable(proneBtn, 'prone');
   makeDraggable(reloadBtn, 'reload');
-  makeDraggable(weaponBtn, 'weaponSwitch');
   makeDraggable(grenadeBtn, 'grenade');
 
   bindFire(fireBtn);
   bindTap(jumpBtn, () => tryJump());
-  bindCrouch(crouchBtn);
+  // A dedicated prone button now, not a hidden double-tap-on-crouch gesture — a real user report
+  // that "the prone button is missing" (double-tap timing on a real touchscreen isn't as
+  // discoverable/reliable as a plain second button). Crouch is now a single, simple toggle.
+  bindTap(crouchBtn, () => setStance(!state.isCrouched, false));
+  bindTap(proneBtn, () => setStance(false, !state.isProne));
   bindTap(reloadBtn, () => reload());
-  bindTap(weaponBtn, () => setWeapon((getCurrentWeaponIndex() + 1) % WEAPONS.length));
   bindGrenade(grenadeBtn);
+  bindWeaponCards();
 
   // ---- Pause + chat (small, top-area utility buttons; not part of the draggable BGMI cluster) ----
   const pauseBtn = document.createElement('button');
@@ -89,6 +99,32 @@ function buildTouchControls() {
     e.preventDefault();
     if (state.touchCustomizing) return;
     if (state.chatOpen) closeChat(); else openChat();
+  }, { passive: false });
+
+  // Always-available fullscreen toggle — see toggleFullscreen()'s own comment for why this needs
+  // to be a dedicated, directly-tappable control rather than only an automatic side effect.
+  const fsBtn = document.createElement('button');
+  fsBtn.id = 'tcFullscreenBtn';
+  fsBtn.type = 'button';
+  fsBtn.textContent = '⛶';
+  root.appendChild(fsBtn);
+  fsBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (state.touchCustomizing) return;
+    toggleFullscreen();
+  }, { passive: false });
+
+  // Stats — the dashboard's own Profile tab isn't reachable mid-match, so this is the only way
+  // to check kills/deaths/wins without quitting. Top-middle, per the explicit placement ask.
+  const statsBtn = document.createElement('button');
+  statsBtn.id = 'tcStatsBtn';
+  statsBtn.type = 'button';
+  statsBtn.textContent = '📊';
+  root.appendChild(statsBtn);
+  statsBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (state.touchCustomizing) return;
+    showStatsOverlay();
   }, { passive: false });
 
   // ---- Customize-mode "Done" button (hidden outside edit mode, see touchLayout.js) ----
@@ -187,6 +223,19 @@ function bindJoystick(base, knob) {
 // its own tracked pointerId, independent of the joystick/fire/grenade pointers — this is what
 // lets "hold grenade with one thumb, aim by dragging with the other" just work with no special
 // gesture code in the grenade button itself. ----
+//
+// Explicit ask: a half-screen-width drag should rotate almost a full 360°, well beyond desktop's
+// per-pixel mouse feel (which assumes small movementX deltas under Pointer Lock, not a whole
+// screen's worth of finger travel) — so touch needs a genuinely different base sensitivity, not
+// just a different SLIDER position on the same scale. TOUCH_BASE_SENS_MULT is that base,
+// calculated (not guessed) so a half-width drag at REFERENCE_WIDTH lands just under 360°:
+// (REFERENCE_WIDTH/2) * 0.0022 (applyLookDelta's own per-pixel constant) * TOUCH_BASE_SENS_MULT
+// ≈ 342°. state.touchLookSensitivity (the Settings slider, 20%-200%) then multiplies ON TOP of
+// this new base, so "increase from Settings" scales up from the already-boosted feel, not from
+// desktop's much smaller baseline. dx/dy are normalized against REFERENCE_WIDTH before that, so
+// the "half screen = ~360°" feel holds regardless of the actual device's real screen width.
+const REFERENCE_WIDTH = 800;
+const TOUCH_BASE_SENS_MULT = 6.8;
 function bindLookZone(zone) {
   let pointerId = null, lastX = 0, lastY = 0;
   zone.addEventListener('pointerdown', (e) => {
@@ -197,9 +246,10 @@ function bindLookZone(zone) {
   }, { passive: false });
   zone.addEventListener('pointermove', (e) => {
     if (pointerId !== e.pointerId) return;
-    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    const widthScale = REFERENCE_WIDTH / window.innerWidth;
+    const dx = (e.clientX - lastX) * widthScale, dy = (e.clientY - lastY) * widthScale;
     lastX = e.clientX; lastY = e.clientY;
-    applyLookDelta(dx, dy, state.touchLookSensitivity);
+    applyLookDelta(dx, dy, TOUCH_BASE_SENS_MULT * state.touchLookSensitivity);
   });
   const end = (e) => { if (pointerId === e.pointerId) pointerId = null; };
   zone.addEventListener('pointerup', end);
@@ -214,70 +264,128 @@ function bindTap(el, fn) {
   }, { passive: false });
 }
 
+// Fire does double duty on mobile: normal shooting, OR — while a grenade is equipped via the
+// grenade button (see bindGrenade below) — holding it is what shows the aim trajectory, and
+// releasing it is what actually throws. This is the real fix for "can't move the camera while
+// the grenade button is held": the OLD flow needed the grenade button held the whole time you
+// aimed, which ties up the exact touch point BGMI players use to look around one-handed. Now the
+// grenade button is a quick tap (equip only, look-zone stays completely free the whole time it's
+// just sitting in your hand), and aiming/throwing piggybacks on the SAME fire button players
+// already know, exactly matching BGMI's own mobile grenade flow.
 function bindFire(el) {
+  // Tracked per-gesture (set at press, read at release) rather than re-checking
+  // isGrenadeEquippedMobile() at release time — an edge case worth guarding against: if it were
+  // re-checked at release, a normal fire-hold that happens to still be in progress right as a
+  // grenade gets equipped by a second finger could release into the wrong branch (throwing
+  // instead of just stopping the gun).
+  let aimingGrenadeThisPress = false;
   el.addEventListener('pointerdown', (e) => {
-    if (state.touchCustomizing || state.chatOpen || !state.controlsActive || isGrenadeBusy()) return;
+    if (state.touchCustomizing || state.chatOpen || !state.controlsActive) return;
     e.preventDefault();
-    startFireSequence();
+    aimingGrenadeThisPress = isGrenadeEquippedMobile();
+    if (aimingGrenadeThisPress) startAimingThrowMobile();
+    else if (!isGrenadeBusy()) startFireSequence();
   }, { passive: false });
-  const end = () => { if (!state.touchCustomizing) stopFiring(); };
+  const end = () => {
+    if (state.touchCustomizing) return;
+    if (aimingGrenadeThisPress) releaseGrenadeThrow();
+    else stopFiring();
+    updateGrenadeEquippedVisual(); // the throw just cleared grenadeEquippedMobile — reflect that
+  };
   el.addEventListener('pointerup', end);
   el.addEventListener('pointercancel', end);
 }
 
-// Tap = crouch toggle, double-tap = prone toggle — same 320ms window preview.js's double-click
-// reset already uses.
-function bindCrouch(el) {
-  let lastTap = 0;
-  el.addEventListener('pointerdown', (e) => {
-    if (state.touchCustomizing) return;
-    e.preventDefault();
-    const now = performance.now();
-    if (now - lastTap < 320) { setStance(false, !state.isProne); lastTap = 0; }
-    else { setStance(!state.isCrouched, false); lastTap = now; }
-  }, { passive: false });
+function updateGrenadeEquippedVisual() {
+  const el = document.getElementById('tcGrenade');
+  if (el) el.classList.toggle('tcGrenadeEquipped', isGrenadeEquippedMobile());
 }
 
+// A plain tap now, not a hold — equips the grenade (into-hand, no trajectory yet); tapping again
+// while already equipped un-equips it (an explicit way to back out without needing to switch
+// weapons or hold-and-release fire). Aiming/throwing happens on the fire button, see bindFire.
 function bindGrenade(el) {
   el.addEventListener('pointerdown', (e) => {
     if (state.touchCustomizing) return;
     e.preventDefault();
-    startGrenadeAim();
+    if (isGrenadeEquippedMobile()) cancelGrenadeEquipMobile();
+    else equipGrenadeMobile();
+    updateGrenadeEquippedVisual();
   }, { passive: false });
-  const release = () => { if (!state.touchCustomizing) releaseGrenadeThrow(); };
-  const cancel = () => { if (!state.touchCustomizing) cancelGrenadeAim(); };
-  el.addEventListener('pointerup', release);
-  el.addEventListener('pointercancel', cancel); // a slipped thumb here must NOT complete the throw
 }
 
-// ---- The controlsActive gate itself, plus best-effort fullscreen + landscape lock ----
-// Real bug found via a real-device report: this used to `await` requestFullscreen()/
-// orientation.lock() BEFORE setting controlsActive, inside a try/catch. That's safe against a
-// REJECTED promise (caught, execution continues) but not against one that never settles at all —
-// which is exactly what some mobile browsers/WebViews do for these APIs (silently unsupported,
-// not rejected) rather than throwing. The await then hangs forever, and controlsActive never
-// becomes true — matching precisely what was reported: the look-zone (which never checks
-// controlsActive) kept working, while movement/fire/grenade (which all gate on it) were
-// permanently dead. Fixed by making the actual "controls are live" step synchronous and
-// unconditional; fullscreen/orientation-lock are now a separate, fire-and-forget promise chain
-// that can fail or hang without blocking or delaying anything gameplay-relevant.
-export function engageTouchControls() {
-  lockHint.hidden = true;
-  state.controlsActive = true;
-  Promise.resolve()
-    .then(() => state.renderer?.domElement.requestFullscreen?.())
-    .then(() => screen.orientation?.lock?.('landscape'))
-    .catch(() => { /* unsupported (iOS Safari has neither) — updateRotateOverlay() is the fallback */ });
+// BGMI-style weapon switching: tap a card in the existing #weaponBar directly instead of cycling
+// through a separate "SWP" button. Reuses the SAME weapon-bar DOM the desktop HUD already shows
+// (ammo counts and all) rather than building a second, parallel weapon display — mobile just
+// gets a CSS-only shrink (see the @media rule) plus this tap handler, gated to touch devices only
+// so desktop's card-click behavior is completely unchanged (clicking a card with a mouse still
+// does nothing there, exactly as before this batch).
+// Event DELEGATION on the always-present #weaponBar container (not on the individual .weaponCard
+// children) deliberately sidesteps any question of whether buildWeaponBar() (weapons.js) has
+// already populated its cards by the time this runs — the listener works correctly regardless of
+// which module's top-level code happened to execute first.
+function bindWeaponCards() {
+  const weaponBar = document.getElementById('weaponBar');
+  weaponBar.addEventListener('pointerdown', (e) => {
+    if (state.touchCustomizing) return;
+    const card = e.target.closest('.weaponCard');
+    if (!card || card.id === 'grenadeCard') return; // grenade has no card on mobile — see the @media rule and #tcGrenadeBadge
+    e.preventDefault();
+    const weaponCards = [...weaponBar.children].filter((c) => c.id !== 'grenadeCard');
+    const idx = weaponCards.indexOf(card);
+    if (idx < 0) return;
+    cancelGrenadeEquipMobile(); // tapping a weapon card should back out of a pending grenade equip, same as any other weapon switch
+    setWeapon(idx);
+    updateGrenadeEquippedVisual();
+  }, { passive: false });
 }
+
+// ---- Best-effort fullscreen + landscape lock ----
+// The CRITICAL "controls are now live" step (hiding lockHint/pauseMenu, flipping
+// state.controlsActive) lives directly in ui.js's lockHint/resumeBtn click handlers now, not
+// here — a real bug found via a real-device report: this file used to own that critical step
+// entirely, registered into ui.js via a callback (registerTouchLockHandlers) at module-evaluation
+// time. On a slower device, a tap could arrive before that registration finished, and ui.js's
+// handler fell back to desktop's requestLock() (useless on a touchscreen) instead — the overlay
+// never disappeared, exactly as reported. These two functions are now purely an OPTIONAL bonus
+// ui.js calls if/when they happen to be registered by the time of the tap, never required for the
+// game to actually start playing. (A second, earlier bug already fixed here: awaiting
+// requestFullscreen()/orientation.lock() before doing anything — some mobile browsers leave those
+// promises pending forever rather than rejecting, which used to hang this whole function.)
+// Real bug found via a real-device report: this used to fullscreen `state.renderer.domElement`
+// (the bare WebGL canvas) — but #hud, #touchControls, #lockHint, #pauseMenu etc are all SEPARATE
+// top-level siblings in the page, not descendants of the canvas. The Fullscreen API only shows
+// the fullscreened element and ITS OWN subtree; everything else on the page is hidden while it's
+// active. Fullscreening just the canvas made every control disappear the moment it engaged —
+// exactly "the controls disappear" as reported. Fixed by fullscreening `document.documentElement`
+// (the whole page) instead, so nothing outside the canvas gets hidden.
+function requestGameFullscreen() {
+  return Promise.resolve()
+    .then(() => document.documentElement.requestFullscreen?.())
+    .then(() => screen.orientation?.lock?.('landscape'))
+    .catch(() => { /* unsupported (iOS Safari has neither), or the user already backed out of it — updateRotateOverlay() and #tcFullscreenBtn below are the fallbacks */ });
+}
+export function engageTouchControls() { requestGameFullscreen(); }
 export function pauseTouchControls() {
   state.controlsActive = false;
   state.keys.clear();
   stopFiring();
-  cancelGrenadeAim();
+  cancelGrenadeAim(); // covers mid-aim (fire was held); also clears a pending equip as of its own fix below
+  cancelGrenadeEquipMobile(); // covers "equipped but never held fire" — cancelGrenadeAim() alone no-ops in that case since grenadeAiming is still false
+  updateGrenadeEquippedVisual();
 }
-export function resumeTouchControls() {
-  state.controlsActive = true;
-  pauseMenu.hidden = true;
+export function resumeTouchControls() { requestGameFullscreen(); }
+
+// The other half of the same real-device bug report: browsers only grant fullscreen from a
+// genuine, direct user gesture — a device's OS/browser "back" gesture exits fullscreen (a real,
+// expected way to leave it, not a bug), but nothing was then offering a way back IN, since every
+// other fullscreen attempt in this file is a best-effort side effect of some OTHER action
+// (engaging/resuming), not a dedicated, always-available control of its own. This button IS that
+// dedicated control — a direct tap on it is exactly the kind of gesture the Fullscreen API
+// requires, so it reliably works even when the automatic attempts elsewhere don't.
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else requestGameFullscreen();
 }
 
 // Best-effort landscape nudge for browsers where screen.orientation.lock is unsupported (iOS

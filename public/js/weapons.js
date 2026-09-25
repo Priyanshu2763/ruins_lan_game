@@ -82,6 +82,11 @@ export function updateWeaponBar() {
     ammoEl.textContent = w.magSize == null ? '—' : `${ammo[i].mag}/${ammo[i].reserve}`;
   });
   grenadeCountEl.textContent = String(grenadeCount);
+  // Mobile has no grenade weapon-bar card at all (see the @media rule hiding #grenadeCard) — the
+  // count instead lives as a small badge directly on the touch grenade button. #tcGrenadeBadge
+  // only exists on a touch device (touchControls.js), so this is naturally a no-op on desktop.
+  const tcGrenadeBadge = document.getElementById('tcGrenadeBadge');
+  if (tcGrenadeBadge) tcGrenadeBadge.textContent = String(grenadeCount);
   setViewmodelAmmo(currentWeapon, ammo[currentWeapon].mag);
 }
 
@@ -92,6 +97,7 @@ export function setWeapon(idx) {
   if (idx < 0 || idx >= WEAPONS.length) return;
   cancelReload(); // switching weapons drops any in-progress reload, no ammo change
   stopFiring(); // switching away mid-hold shouldn't leave a stale interval/spray loop running
+  cancelGrenadeEquipMobile(); // no-op on desktop (flag never set there) — mobile safety net for tapping a weapon card mid-equip
   currentWeapon = idx;
   setViewmodelWeapon(idx);
   updateWeaponBar();
@@ -226,9 +232,60 @@ function fire() {
 }
 
 // ---------- Grenade throw: hold G to aim (shows the predicted landing arc), release to throw ----------
+// Desktop keeps that exact single-gesture flow untouched. Mobile splits it into two gestures
+// instead (touchControls.js wires this up, gated to touch devices only — see its own comments):
+// tap the grenade button to bring it into hand (equipGrenadeMobile), which frees the look-zone to
+// keep working normally the whole time it's just sitting in your hand (the real bug reported:
+// holding the grenade button the old way consumed the exact touch point a player would otherwise
+// use to look around) — then hold the FIRE button to aim (startAimingThrowMobile, shows the same
+// trajectory line desktop's hold-G does) and release it to throw, reusing releaseGrenadeThrow()
+// unchanged.
 let lastGrenadeThrow = -Infinity;
 let grenadeAiming = false;
+let grenadeEquippedMobile = false;
 let trajectoryLine, trajectoryMarker;
+
+export function isGrenadeEquippedMobile() { return grenadeEquippedMobile; }
+
+export function equipGrenadeMobile() {
+  if (!state.localAlive || !state.sceneReady || grenadeEquippedMobile || grenadeAiming) return;
+  if (grenadeCount <= 0) { sfx.empty(); return; }
+  if (performance.now() - lastGrenadeThrow < GRENADE_COOLDOWN_MS) return;
+  cancelReload();
+  stopFiring();
+  grenadeEquippedMobile = true;
+  grenadeReady(); // raises it into the hand — no trajectory yet, that's gated on the fire button
+}
+
+// Called from touchControls.js's fire button on pointerdown, only while a grenade is equipped —
+// this is the moment the trajectory line actually appears, matching "show the trajectory when we
+// hold the fire button" exactly.
+export function startAimingThrowMobile() {
+  if (!grenadeEquippedMobile || grenadeAiming) return;
+  grenadeAiming = true;
+  trajectoryLine.visible = true;
+  trajectoryMarker.visible = true;
+}
+
+// Equipped but backed out before ever holding fire to aim (switched weapons, opened the pause
+// menu, etc.) — puts the grenade away with no throw and no cooldown penalty, same as never having
+// tapped it. If aiming had already started (fire was held), defers to cancelGrenadeAim() below so
+// that path's own trajectory-hiding logic runs too.
+//
+// Real bug found via a user report: this used to only call grenadeCancel() (the viewmodel cleanup
+// that actually puts the grenade back down) via cancelGrenadeAim() — but that only runs when
+// grenadeAiming is true. Tap grenade (equip, calls grenadeReady()) then immediately tap a weapon
+// card WITHOUT ever holding fire to aim: grenadeAiming was still false, so nothing ever reversed
+// grenadeReady()'s effect — the grenade stayed visually stuck in hand no matter what weapon you
+// switched to, since only cancelGrenadeAim()'s branch actually called grenadeCancel(). Fixed by
+// calling it unconditionally here too — grenadeCancel() is itself a no-op if there's nothing to
+// cancel (gPhase === 'none'), so this can't double up with the cancelGrenadeAim() path below.
+export function cancelGrenadeEquipMobile() {
+  if (!grenadeEquippedMobile) return;
+  grenadeEquippedMobile = false;
+  if (grenadeAiming) cancelGrenadeAim();
+  else grenadeCancel();
+}
 
 export function initTrajectoryVisuals() {
   const maxPts = 40;
@@ -262,6 +319,7 @@ export function startGrenadeAim() {
 export function releaseGrenadeThrow() {
   if (!grenadeAiming) return;
   grenadeAiming = false;
+  grenadeEquippedMobile = false; // no-op on desktop, where this flag is never set in the first place
   trajectoryLine.visible = false;
   trajectoryMarker.visible = false;
   if (!state.localAlive || !state.sceneReady) return;
@@ -285,6 +343,7 @@ export function releaseGrenadeThrow() {
 // can eat the keyup, so this needs to be reachable from outside without exposing grenadeAiming/
 // trajectoryLine/trajectoryMarker themselves. No-ops if not currently aiming.
 export function cancelGrenadeAim() {
+  grenadeEquippedMobile = false; // defensive, regardless of call path — never leave mobile's equip flag stuck true
   if (!grenadeAiming) return;
   grenadeCancel();
   grenadeAiming = false;
