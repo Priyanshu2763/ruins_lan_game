@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { WEAPONS } from '/shared/gameData.js';
 import { state } from './state.js';
-import { buildFirstPersonRig, updateFirstPersonRig, redressFirstPersonRig, onCharacterTemplateReady, getMuzzleAlongBarrel, attachFirstPersonProp, FP_GRENADE_ID } from './characters.js';
+import { buildFirstPersonRig, updateFirstPersonRig, redressFirstPersonRig, onCharacterTemplateReady, onOperatorReady, getMuzzleAlongBarrel, attachFirstPersonProp, FP_GRENADE_ID } from './characters.js';
 import { createGrenade, onGrenadeModelReady, setPinPull, setPinVisible } from './grenadeModel.js';
 import { createGunAnim } from './gunanim.js';
 
@@ -31,9 +31,22 @@ const AIM = {
   // per-weapon fovMult (see updateAdsFov) — the explicit ask was a tight, "looking right
   // through the sight" iron-sight view (matching the reference screenshot), not just a mild
   // pose shift. fovMult on the other two is the same mild non-magnified-optic narrow as before.
-  0: { pos: new THREE.Vector3(0, -0.075, -0.34), rot: new THREE.Euler(0, 0, 0), fovMult: 0.62 },   // AKM iron sight
-  1: { pos: new THREE.Vector3(0, -0.09, -0.36), rot: new THREE.Euler(0, 0, 0), fovMult: 0.82 },   // Shotgun holo
-  2: { pos: new THREE.Vector3(0, -0.08, -0.34), rot: new THREE.Euler(0, 0, 0), fovMult: 0.82 },   // Glock red dot
+  // z values below were tuned by MEASURING each gun's actual view-space bounding box while aimed
+  // (a temporary debug hook, since removed) — the AKM and shotgun were both found to have their
+  // nearest geometry closer to the camera than camera.near (0.1), i.e., the camera was literally inside
+  // the gun's stock/receiver ("the eye getting into the AKM butt") — pushed back until the
+  // nearest point measures well past -0.15 in view space for both. y values were solved the same
+  // way: the reticle's own world position (ADS_RETICLE, characters.js) was projected into camera
+  // space and its Y offset from dead-center measured directly, not eyeballed — this is what "the
+  // dot should be mapped to where the gun is hitting" actually requires (point-of-aim has to
+  // coincide with screen center, since that's also where the fired-shot ray originates).
+  // AKM y re-measured after a follow-up report: the sight hood filled screen center, blocking
+  // the view — real ADS should sit low with just its TOP edge grazing center so you can actually
+  // see over it. Measured the gun's real view-space bounding box while aimed (top edge was at
+  // +0.0475, should be ~0) and shifted pos.y down by exactly that.
+  0: { pos: new THREE.Vector3(0, -0.1225, -0.42), rot: new THREE.Euler(0, 0, 0), fovMult: 0.62 },   // AKM iron sight
+  1: { pos: new THREE.Vector3(0, -0.145, -0.45), rot: new THREE.Euler(0, 0, 0), fovMult: 0.82 },   // Shotgun holo
+  2: { pos: new THREE.Vector3(0, -0.114, -0.34), rot: new THREE.Euler(0, 0, 0), fovMult: 0.82 },   // Glock red dot
 };
 let aimBlend = 0; // 0 = hip, 1 = fully aimed, smoothed each frame in computePose
 
@@ -85,6 +98,15 @@ export function initViewmodel() {
   flashStar.scale.set(0, 0, 0); fpScene.add(flashStar);
   flashLight = new THREE.PointLight(0xffb060, 0, 1.6); fpScene.add(flashLight);
   onCharacterTemplateReady(() => { templateReady = true; rebuild(); });
+  // Real bug fix (live report: hands/gun invisible, esp. after a refresh — see characters.js's
+  // own comment on onOperatorReady for the full root cause): buildFirstPersonRig() can come back
+  // null the first time if the player's own appearance is an Operator that's still mid-load, and
+  // unlike remote players (pendingCreates/retryPendingCreates) nothing used to retry the LOCAL
+  // rig once that load actually finished — it just stayed empty for the rest of the page's life.
+  // Only retry when we don't already have a working rig; every operator load fires this, and most
+  // of those have nothing to do with the local player's own appearance, so re-running rebuild()
+  // unconditionally would pointlessly tear down and rebuild a perfectly fine rig on every one.
+  onOperatorReady(() => { if (!rig) rebuild(); });
   onGrenadeModelReady(mountGrenadeProp);
 }
 
@@ -126,6 +148,31 @@ export function setViewmodelAppearance(app) {
   redressFirstPersonRig(rig, app);
 }
 export function getMuzzleFlashTexture() { return muzzleFlash.material.map; }
+
+// TEMPORARY — verifying the AKM's true sight-line: does the exact fire-ray direction (camera
+// forward, dead screen-center) pass through the rear sight's actual notch opening, or hit solid
+// housing material? Removed after.
+window.__raycastCheck = function () {
+  if (!rig) return { error: 'no rig' };
+  const gun = rig.heldGuns.get(weaponId);
+  if (!gun) return { error: 'no gun' };
+  fpScene.updateMatrixWorld(true);
+  const camera = state.camera;
+  const origin = new THREE.Vector3();
+  camera.getWorldPosition(origin);
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const raycaster = new THREE.Raycaster(origin, dir, 0.001, 5);
+  raycaster.camera = camera; // required for Sprite intersection (the red dot's reticle is a Sprite)
+  const hits = raycaster.intersectObject(gun, true);
+  return {
+    weaponId,
+    hitCount: hits.length,
+    firstHit: hits[0] ? { distance: hits[0].distance, objectName: hits[0].object.name || hits[0].object.parent?.name || '(unnamed)', point: hits[0].point.toArray() } : null,
+    allHits: hits.map((h) => ({ distance: h.distance, name: h.object.name || '(unnamed)' })),
+  };
+};
+
 
 // Called from the bootstrap's animate() BEFORE the world render (not from renderViewmodel, which
 // runs AFTER it) — camera.fov has to be current for the world's own render call this same frame,

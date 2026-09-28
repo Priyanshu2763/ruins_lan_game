@@ -8,7 +8,7 @@ import { guestAppearance, sanitizeAppearance } from '/shared/appearance.js';
 import { playPositionalLoopStart, dryPositionFor, applyOcclusionParams, isOccludedBetween, localListenerPos } from './audio.js';
 import { QUAT_TO_MIXAMO } from './retarget.js';
 import { isOperatorId, canStripClothes, loadOperator, getLoadedOperator } from './operators.js';
-import { buildRedDotSight, buildHoloSight } from './sights.js';
+import { buildRedDotSight, buildHoloSight, preloadSights } from './sights.js';
 
 // Real assets (Quaternius, CC0 — see CLAUDE.md for the batch that added these) replacing the
 // old stacked-BoxGeometry figure: a rigged/animated humanoid + a shared animation library +
@@ -30,7 +30,10 @@ const GUN_URLS = { 0: '/models/guns/akm.fbx', 1: '/models/guns/shotgun.fbx', 2: 
 // same fraction convention GUN_FIT.grip already uses) and how high above the gun's own top
 // surface. First-pass estimates, tuned by rendering the actual result (see normalizeGun below).
 const SIGHT_MOUNTS = {
-  1: { build: buildHoloSight, mountFrac: 0.42, gap: 0.006, scale: 1.3 }, // Shotgun — receiver-top rail; real holo housings read visibly chunkier than a red dot's tube
+  // scale is 1.0 for both now — sights.js's TARGET_LENGTH already normalizes each model to a
+  // real-world size (the old non-1.0 fudge factors were tuned against the earlier procedural
+  // shapes' own arbitrary internal units, not applicable to these real, real-world-scaled models).
+  1: { build: buildHoloSight, mountFrac: 0.42, gap: 0.006, scale: 1.0 }, // Shotgun — receiver-top rail
   2: { build: buildRedDotSight, mountFrac: 0.55, gap: 0.004, scale: 1.0 }, // Glock — slide-top rail
 };
 
@@ -149,6 +152,7 @@ function mountSight(outer, weaponId, s, fit, size) {
   const topY = s * fit.slim * size.y / 2; // gun's own top surface in outer-local meters (see normalizeGun's own comment on this derivation)
   sight.scale.setScalar(mount.scale);
   sight.position.set(fit.length * mount.mountFrac, topY + mount.gap, 0);
+  sight.name = 'ADS_SIGHT'; // findable for the reticle-alignment math in viewmodel.js
   outer.add(sight);
 }
 
@@ -235,6 +239,19 @@ async function loadTemplate() {
     ...gunIds.map((id) => fbxLoader.loadAsync(GUN_URLS[id])),
     ...HAIR_FILES.map((f) => gltfLoader.loadAsync(`/models/character/hair/${f}.gltf`)),
   ]);
+  // Real regression, found from a live report: preloadSights() used to be IN the Promise.all
+  // above, coupling the whole character/gun template to two extra FBX loads that have nothing to
+  // do with it — any failure there (or even just being slow) took down guns/hands entirely,
+  // exactly the "game was fine before today" report. Sights are a cosmetic attachment; loading
+  // them can never be allowed to block or break the base character/gun template again. Own
+  // isolated try/catch — on failure, guns simply build without a mounted sight (mountSight
+  // already no-ops safely if the sight template isn't ready, see below) instead of the entire
+  // player disappearing.
+  try {
+    await preloadSights();
+  } catch (err) {
+    console.error('sight model load failed — guns will render without sight attachments:', err);
+  }
   const gunObjs = rest.slice(0, gunIds.length);
   const hairs = rest.slice(gunIds.length, gunIds.length + HAIR_FILES.length);
   const clips = new Map();
@@ -253,7 +270,26 @@ async function loadTemplate() {
 // gets through auth + the dashboard + actually joins a room, this (a ~20MB one-time local fetch)
 // is essentially always finished. Every consumer below still guards against the rare case it
 // isn't, rather than assuming.
-loadTemplate().catch((err) => console.error('character/weapon model load failed:', err));
+//
+// Real bug found via a user report ("sometimes on start or on refresh the gun and hand
+// disappear"): loadTemplate() fires ~15 requests in ONE Promise.all (2 character glTFs, 1
+// animation glb, 2 skin textures, 4 gun FBXs, 6 hair glTFs) — Promise.all rejects the INSTANT any
+// single one does, and the old code just swallowed that into a console.error with zero retry,
+// permanently leaving templateReady false (so rebuild() no-ops forever, see its own comment) for
+// the rest of that page's life. A flaky connection dropping even one of those 15 parallel
+// requests was enough to break the viewmodel/remote figures entirely until a lucky reload. Now
+// retries the WHOLE batch up to 3 times with a short backoff before actually giving up.
+async function loadTemplateWithRetry(attempt = 1) {
+  try {
+    await loadTemplate();
+  } catch (err) {
+    console.error(`character/weapon model load failed (attempt ${attempt}/3):`, err);
+    if (attempt >= 3) return;
+    await new Promise((r) => setTimeout(r, attempt * 1500));
+    return loadTemplateWithRetry(attempt + 1);
+  }
+}
+loadTemplateWithRetry();
 
 export function isCharacterTemplateReady() { return !!template; }
 export function onCharacterTemplateReady(fn) { onceReady(fn); }
@@ -423,7 +459,10 @@ function buildOperatorFigure(appearance) {
     // all 8 for players who never touch Operators mode) load in the background and let the caller
     // retry, same "return null, try again next tick" contract buildCharacterFigure already has
     // while the Quaternius template itself is still loading.
-    if (template) loadOperator(opId, () => cloneSkinned(template.scenes.male), template.clips).then(retryPendingCreates);
+    if (template) loadOperator(opId, () => cloneSkinned(template.scenes.male), template.clips).then(() => {
+      retryPendingCreates();
+      for (const fn of operatorReadyCallbacks) fn();
+    });
     return null;
   }
   const model = cloneSkinned(loaded.model);
@@ -611,10 +650,33 @@ function armsOnlyGeometry(orig, skeleton, armRegex) {
   // Quaternius glTF bodies which always have an index buffer — fall back to a synthetic 0..n-1
   // index (one "triangle" per 3 consecutive vertices) so this works on either.
   const src = orig.index ? orig.index.array : Array.from({ length: n }, (_, i) => i), keep = [];
-  for (let t = 0; t < src.length; t += 3) if (arm[src[t]] >= 0.5 && arm[src[t + 1]] >= 0.5 && arm[src[t + 2]] >= 0.5) keep.push(src[t], src[t + 1], src[t + 2]);
+  // Real bug, found from a live report ("hands invisible") and only reproduced on an Operator
+  // whose body mesh actually has more than one material (Frank: 2, most others: 1 — which is
+  // exactly why this never showed up for Custom bodies or most Operators): a multi-material mesh
+  // needs `geometry.groups` to tell WebGL which index range belongs to which material, and this
+  // function was building a brand-new index array without carrying any groups over at all — for
+  // a single-material mesh that's a silent no-op (nothing reads groups), but for a multi-material
+  // one, three.js draws nothing for any material index that has no group, which for this rebuilt
+  // geometry was ALL of them, i.e. the whole mesh renders zero triangles despite geometry, skin
+  // weights, texture and bone matrices all being individually fine (confirmed by direct testing:
+  // forcing a single-material override made it render immediately). Fixed by walking each
+  // original group's own triangle range through the same arm filter and re-deriving its
+  // start/count against the NEW index — filtering preserves each group's internal triangle order,
+  // so its surviving triangles stay contiguous in `keep`, which is what makes this a straight
+  // per-group re-count rather than needing to interleave/sort anything.
+  const origGroups = orig.groups && orig.groups.length ? orig.groups : [{ start: 0, count: src.length, materialIndex: 0 }];
+  const groups = [];
+  for (const grp of origGroups) {
+    const groupStart = keep.length;
+    for (let t = grp.start; t < grp.start + grp.count; t += 3) {
+      if (arm[src[t]] >= 0.5 && arm[src[t + 1]] >= 0.5 && arm[src[t + 2]] >= 0.5) keep.push(src[t], src[t + 1], src[t + 2]);
+    }
+    if (keep.length > groupStart) groups.push({ start: groupStart, count: keep.length - groupStart, materialIndex: grp.materialIndex });
+  }
   const g = new THREE.BufferGeometry();
   for (const name of Object.keys(orig.attributes)) g.setAttribute(name, orig.attributes[name]);
   g.setIndex(keep);
+  for (const grp of groups) g.addGroup(grp.start, grp.count, grp.materialIndex);
   armGeoCache.set(orig, g);
   return g;
 }
@@ -767,6 +829,20 @@ export function createRemote(id, name, pos) {
   });
 }
 export function retryPendingCreates() { for (const args of pendingCreates.splice(0)) createRemote(...args); }
+
+// Real bug found from a live report ("hands/gun invisible after join/refresh"): when the LOCAL
+// player's own appearance is an Operator that hasn't finished its lazy per-id load yet,
+// buildFirstPersonRig() (below) returns null exactly like buildCharacterFigure does for a remote
+// player in the same situation — but remote players get retried automatically once the operator
+// finishes loading (pendingCreates/retryPendingCreates, above); the local first-person rig had no
+// equivalent hook at all, so if the operator lost that race even once, the player's own hands and
+// gun stayed permanently empty for the rest of that page's life (matches "sometimes on join, and
+// reliably after a refresh/rejoin" — a fresh page has to reload the operator from scratch every
+// time, so it's much more likely to still be loading exactly when the rig first tries to build).
+// viewmodel.js subscribes here and retries its own rebuild whenever any operator finishes loading,
+// the same "fire and let every interested listener recheck" shape as onCharacterTemplateReady.
+const operatorReadyCallbacks = [];
+export function onOperatorReady(fn) { operatorReadyCallbacks.push(fn); }
 onceReady(retryPendingCreates);
 
 export function removeRemote(id) {
