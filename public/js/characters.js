@@ -327,7 +327,7 @@ function attachAimAndGuns(model, boneNames) {
   // model.scale is never touched), so this is a no-op there.
   const worldScale = model.scale.x;
   const bones = {};
-  for (const n of ['spine_01', 'spine_02', 'spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
+  for (const n of ['spine_01', 'spine_02', 'spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head', 'thigh_l', 'calf_l', 'foot_l', 'thigh_r', 'calf_r', 'foot_r']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
   // Real bug found here via live debugging (not just a style nit): matrixWorld on a freshly built/
   // cloned Object3D tree defaults to identity until updateMatrixWorld() actually runs once — so
   // without this call, every getWorldQuaternion() below would read garbage identity-derived values
@@ -574,6 +574,47 @@ export function updateFigure(fig, dt) {
   if (fig.crouch && !fig.prone && fig.upperBodyBindQ) {
     for (const n of ['spine_01', 'spine_02', 'spine_03', 'neck_01', 'Head']) {
       if (fig.bones[n] && fig.upperBodyBindQ[n]) fig.bones[n].quaternion.copy(fig.upperBodyBindQ[n]);
+    }
+  }
+  // Real bug, found via live measurement (not eyeballing): the stock Crouch_Idle_Loop clip itself
+  // bakes in a lopsided stance — the right foot sits ~8cm above the left foot's height (and above
+  // where it sits in the standing pose) for the ENTIRE idle hold, not a passing mid-stride moment —
+  // measured directly (world-space foot bone Y sampled across the whole ~2.9s clip, both legs'
+  // heights basically constant the whole time). That's a real gap between sole and floor, exactly
+  // what reads as "floating"/"walking on air" while just standing still crouched. This is baked into
+  // the third-party clip's own keyframes (reproduces identically on a Custom body, which never goes
+  // through retargeting at all, so it isn't a retargeting bug either) — not something worth trying to
+  // re-author. Fix, same spirit as the upper-body correction just above (override the broken part
+  // with a known-good reference instead of algebraically patching it): while idle-crouching (never
+  // while crouch-WALKING, which has its own legitimate alternating stride — see the `!fig.moving`
+  // guard), mirror the LEFT leg's own current local rotation onto the RIGHT leg's matching bones each
+  // frame. The left leg's pose is already correctly grounded (measured: matches its own standing
+  // height), and this rig's left/right bone pairs share the convention (standard for this UE-
+  // mannequin-derived skeleton, see retarget.js's own note on both rigs sharing topology) where the
+  // same local quaternion on the mirrored bone produces a mirrored, still-anatomically-correct pose —
+  // so this reads as a clean, symmetric, fully-grounded crouch stance instead of copying broken data.
+  //
+  // Measured result: closes most but not quite all of the gap (~8cm down to ~3-4cm) — the clip also
+  // bakes a slight pelvis roll into the same weight-shift, which a leg-only mirror can't fully cancel
+  // since both legs still hang off a not-quite-level hip. Tried also resetting `pelvis` to its bind
+  // rotation the same way the torso bones above do — measured result was WORSE, not better: it made
+  // both feet perfectly symmetric again but raised BOTH up to ~0.28-0.31 (vs the correct ~0.103),
+  // because the clip's forward pelvis tilt is part of what pushes the correctly-grounded LEFT leg
+  // down that low in the first place — leveling it lifted the whole stance. Reverted; left as the
+  // smaller, asymmetric-but-far-closer residual gap rather than a symmetric-but-worse one.
+  //
+  // Real regression, caught from a live screenshot right after this shipped: on an Operator body
+  // (mixamorig skeleton, retargeted clip — see retarget.js) this collapsed the WHOLE figure into a
+  // twisted heap instead of just fixing a foot. Only ever measured/verified against a Custom body's
+  // un-retargeted clip; never checked an Operator's LEFT leg was even correctly grounded to begin
+  // with before mirroring it onto the right — if it wasn't (plausible: a different clip, a different
+  // retargeted bind pose, this rig's own asymmetry), copying it doubles down on whatever was already
+  // wrong there instead of fixing anything. Scoped to Custom bodies only until an Operator is
+  // actually measured the same way (see the git history around this line for the exact numbers that
+  // justified doing it for Custom).
+  if (fig.crouch && !fig.prone && !fig.moving && !fig.isOperator) {
+    for (const [l, r] of [['thigh_l', 'thigh_r'], ['calf_l', 'calf_r'], ['foot_l', 'foot_r']]) {
+      if (fig.bones[l] && fig.bones[r]) fig.bones[r].quaternion.copy(fig.bones[l].quaternion);
     }
   }
   const grips = GRIPS[fig.weaponId];
@@ -936,6 +977,7 @@ function animateRemoteFigure(rp, dt) {
   setFigureWeapon(rp.fig, rp.weapon);
   rp.fig.prone = rp.prone;
   rp.fig.crouch = rp.crouch;
+  rp.fig.moving = rp.moving;
   updateFigure(rp.fig, dt);
 
   const lerpT = Math.min(1, dt * 8);
