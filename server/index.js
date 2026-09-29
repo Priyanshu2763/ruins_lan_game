@@ -436,6 +436,36 @@ function rayCylinderDist(origin, dir, cx, cz, radius, yMin, yMax) {
   return t;
 }
 
+// Real bug, found from a live report + screenshot: `other.pos` is the player's own standing/
+// crouching PIVOT point (feet), which is exactly right for a vertical cylinder while standing or
+// crouching — but a PRONE player's body doesn't stand up around that point, it lies down and
+// extends ~1.5 units out from it in whatever direction they're FACING (confirmed by directly
+// measuring the rendered prone figure at several yaw values: the head sits ~1.4-1.6 units from
+// `pos`, displaced along (sin(yaw), 0, -cos(yaw)) — this engine's established "yaw 0 faces -Z"
+// convention). A single small-radius cylinder anchored at `pos` alone — what every other stance
+// correctly uses — only ever covers the feet end; shooting anywhere from roughly the chest up
+// was hitting empty space next to the actual body, exactly the "vertical hitbox, |___ shaped
+// body" the report described.
+//
+// Fixed the same way this codebase already handles "no rotated-hitbox support" elsewhere (see
+// gameData.js's makeDiagonalCoverWall) — approximate the elongated body as a short CHAIN of
+// overlapping cylinders walked along the facing direction, rather than attempting an exact
+// ray-vs-capsule solve. Spacing (0.2 of the 1.5-unit length = 0.3 units) is well under 2×radius
+// (0.8), so consecutive cylinders overlap with real margin — no gap a shot could slip through
+// between samples.
+const PRONE_BODY_LENGTH = 1.5;
+function rayProneBodyDist(origin, dir, px, pz, yaw, radius, yMin, yMax) {
+  const fx = Math.sin(yaw), fz = -Math.cos(yaw);
+  let best = Infinity;
+  for (let s = 0; s <= 1.0001; s += 0.2) {
+    const cx = px + fx * PRONE_BODY_LENGTH * s;
+    const cz = pz + fz * PRONE_BODY_LENGTH * s;
+    const t = rayCylinderDist(origin, dir, cx, cz, radius, yMin, yMax);
+    if (t < best) best = t;
+  }
+  return best;
+}
+
 // Nearest distance from `from` toward `to` at which a wall blocks line of sight, or Infinity
 // if the path is clear. Shared by bullets (handleAttack) and grenade blast damage. `obstacles`
 // is room.physicsObstacles — each room's own map layout, not a single shared global anymore.
@@ -537,7 +567,10 @@ function handleAttack(player, room, weaponIdx, origin, dir) {
     // hit-cylinder keeps its own separate, deliberately generous PRONE_HEAD_OFFSET-based
     // height for torso/legs coverage instead of shrinking down to just the head band.
     const yMax = other.pos[1] + (other.prone ? PRONE_HEAD_OFFSET + 0.2 : headYMax);
-    const dist = rayCylinderDist(origin, d, other.pos[0], other.pos[2], hitRadius, yMin, yMax);
+    const yaw = Array.isArray(other.rot) ? other.rot[0] : 0;
+    const dist = other.prone
+      ? rayProneBodyDist(origin, d, other.pos[0], other.pos[2], yaw, hitRadius, yMin, yMax)
+      : rayCylinderDist(origin, d, other.pos[0], other.pos[2], hitRadius, yMin, yMax);
     // a hit only counts if it's closer than any wall in the way — that's what stops shots
     // from passing straight through obstacles to whoever's standing behind them.
     if (dist <= wallDist && dist < bestDist) {

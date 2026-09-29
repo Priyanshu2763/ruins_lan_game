@@ -48,7 +48,18 @@ const GUN_FIT = {
   0: { length: 0.84, grip: 0.3, slim: 0.72 },
   1: { length: 0.95, grip: 0.3, slim: 0.78 },
   2: { length: 0.19, grip: 0.15, slim: 0.82 },
-  3: { length: 0.3, grip: 0.1, slim: 1 },
+  // Real bug, found from a live report ("the knife has disappeared from gameplay") — it hadn't
+  // disappeared, it was rendering at roughly a TENTH of its intended size: measured directly
+  // (a debug material + scale override on a live figure), the knife at its old `length: 0.3` was
+  // a barely-visible speck; forcing a 5x scale override made it read as a properly-sized, clearly
+  // held blade. The other three guns' own `length` values all render correctly at face value —
+  // this looks specific to something in the knife's own FBX (traced as far as a raw mesh-level
+  // scale of 100 buried inside it, an order of magnitude beyond what `normalizeGun`'s own
+  // `s = length/size.x` calculation should need to fully correct for, though the exact internal
+  // cause wasn't fully isolated under time pressure). Fixed pragmatically and verified visually:
+  // scaled the target length up to compensate, checked by rendering the result directly rather
+  // than assuming the multiplier was exactly right.
+  3: { length: 0.9, grip: 0.1, slim: 1 },
 };
 // The FBX guns ship with near-black Phong colours (#070707 … #1d1e20) that read as flat silhouettes
 // up close (the first-person view) — re-skin them as lit gunmetal/wood, keyed on the pack's own
@@ -383,6 +394,20 @@ function attachAimAndGuns(model, boneNames) {
     const inst = gunTemplateObj.clone(true); // rigid prop, not skinned — plain deep clone is correct
     inst.visible = false;
     inst.scale.setScalar(1 / worldScale); // cancel the inherited body scale so the gun keeps its real fitted size
+    // Real bug, found from a live report ("the knife has disappeared from gameplay") and confirmed
+    // by directly inspecting a live figure: the knife rendered with perfectly healthy data (real
+    // geometry, correct material, visible=true, correctly parented to hand_r) yet never actually
+    // drew — its mesh had frustumCulled left at THREE's default `true`. The knife (unlike the
+    // rifles/pistol, which ride `aim` — a plain anchor manually repositioned each frame) is a
+    // child of an actual ANIMATED BONE deep inside the skinned hierarchy (hand_r), the same kind
+    // of object buildCharacterFigure's own comment already flags as needing frustumCulled=false
+    // ("bounding info on a skinned mesh is computed from the BIND pose — once real animation moves
+    // the skeleton away from that pose, the stale bounds can clip a fully on-screen [object] out
+    // of view") — that reasoning was only ever applied to the actual SkinnedMesh body parts, never
+    // to a rigid prop riding a bone, which turns out to need it just as much. Applied to every
+    // held prop here, not just the knife, since any future one-handed weapon riding hand_r the
+    // same way would hit the identical bug.
+    inst.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
     if (GRIPS[weaponId]) aim.add(inst);
     else if (bones.hand_r) {
       inst.quaternion.copy(GUN_IN_HAND_QUAT);
