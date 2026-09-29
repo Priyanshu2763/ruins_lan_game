@@ -1070,7 +1070,17 @@ export function updateRemotePlayers(dt) {
     rp.mesh.position.lerp(rp.targetPos, Math.min(1, dt * 10));
     let dr = rp.targetRotY - rp.mesh.rotation.y;
     dr = Math.atan2(Math.sin(dr), Math.cos(dr));
-    rp.mesh.rotation.y += dr * Math.min(1, dt * 10);
+    // Real bug, found from a live report: a prone player's hit-capsule (see rayProneBodyDist,
+    // server/index.js) is oriented by their exact CURRENT yaw, with no smoothing — the server
+    // always uses the true, instant value. This rotation lerp, though, smooths what an OBSERVER
+    // actually SEES over ~100ms (dt*10 has a ~100ms time constant) — while a prone player spins
+    // their view around, the visible body measurably lags behind where the real hit-capsule
+    // already is, since standing/crouching hitboxes don't care about facing at all, only prone's
+    // new capsule does. Sped up specifically for rotation (position lag doesn't have this
+    // problem — the old point-cylinder never cared about facing) so what's visually shown
+    // catches up to the server's own instant truth much faster, cutting the divergence window
+    // roughly in half without making a fast-turning figure look like it's snapping.
+    rp.mesh.rotation.y += dr * Math.min(1, dt * 22);
     animateRemoteFigure(rp, dt);
     // Keep an active footstep loop's panners tracking this player's live (lerped) position —
     // same split as the grenade tick: reposition every frame (cheap), throttle the occlusion

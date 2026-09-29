@@ -568,8 +568,21 @@ function handleAttack(player, room, weaponIdx, origin, dir) {
     // height for torso/legs coverage instead of shrinking down to just the head band.
     const yMax = other.pos[1] + (other.prone ? PRONE_HEAD_OFFSET + 0.2 : headYMax);
     const yaw = Array.isArray(other.rot) ? other.rot[0] : 0;
+    // Prone's capsule is the only hit-shape that depends on facing direction at all — standing/
+    // crouching are plain vertical cylinders, indifferent to yaw. That makes prone uniquely
+    // exposed to a real class of bug a live report caught: the SERVER always uses the target's
+    // exact, instant rotation (as it should, it's the authority), but the OBSERVER's own client
+    // only sees a SMOOTHED version of that rotation (see the render-side fix, updateRemotePlayers
+    // in characters.js) — while a prone player is actively turning, what the shooter visually
+    // sees can measurably lag behind where the real capsule has already rotated to, especially
+    // over the ~1.5-unit body length where even a modest angular gap becomes a real positional
+    // one at the far (head) end. The render-side fix closes most of that gap; this is the other
+    // half — a real, deliberate margin on TOP of the normal player radius, prone only, so the
+    // residual lag any network/frame-rate jitter still leaves doesn't read as "shooting the body
+    // and missing."
+    const proneRadius = hitRadius + 0.3;
     const dist = other.prone
-      ? rayProneBodyDist(origin, d, other.pos[0], other.pos[2], yaw, hitRadius, yMin, yMax)
+      ? rayProneBodyDist(origin, d, other.pos[0], other.pos[2], yaw, proneRadius, yMin, yMax)
       : rayCylinderDist(origin, d, other.pos[0], other.pos[2], hitRadius, yMin, yMax);
     // a hit only counts if it's closer than any wall in the way — that's what stops shots
     // from passing straight through obstacles to whoever's standing behind them.
