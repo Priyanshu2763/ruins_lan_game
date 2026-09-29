@@ -327,7 +327,7 @@ function attachAimAndGuns(model, boneNames) {
   // model.scale is never touched), so this is a no-op there.
   const worldScale = model.scale.x;
   const bones = {};
-  for (const n of ['spine_01', 'spine_02', 'spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head', 'thigh_l', 'calf_l', 'foot_l', 'thigh_r', 'calf_r', 'foot_r']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
+  for (const n of ['spine_01', 'spine_02', 'spine_03', 'upperarm_r', 'lowerarm_r', 'hand_r', 'upperarm_l', 'lowerarm_l', 'hand_l', 'neck_01', 'Head', 'thigh_l', 'calf_l', 'foot_l', 'thigh_r', 'calf_r', 'foot_r', 'pelvis']) bones[n] = model.getObjectByName(boneNames ? boneNames[n] : n);
   // Real bug found here via live debugging (not just a style nit): matrixWorld on a freshly built/
   // cloned Object3D tree defaults to identity until updateMatrixWorld() actually runs once — so
   // without this call, every getWorldQuaternion() below would read garbage identity-derived values
@@ -344,6 +344,20 @@ function attachAimAndGuns(model, boneNames) {
   // (thigh/calf/foot, untouched here) actually do the crouching, dropping the character's height.
   const upperBodyBindQ = {};
   for (const n of ['spine_01', 'spine_02', 'spine_03', 'neck_01', 'Head']) upperBodyBindQ[n] = bones[n] && bones[n].quaternion.clone();
+  // Real bug, found from a live user screenshot (an Operator's crouch-WALK visibly levitating,
+  // much worse than the small Custom-body foot gap fixed above): retarget.js's own hip-position
+  // retargeting (the VectorKeyframeTrack it builds for the hips bone) measures correctly against
+  // Crouch_Idle_Loop but effectively doesn't lower the hip at all for Crouch_Fwd_Loop — measured
+  // directly on a live figure: pelvis world Y sat at ~0.98 while crouch-walking, barely different
+  // from a normal standing hip height for a 1.82-unit-tall figure, instead of dropping the ~40%
+  // a real crouch needs (confirmed correct on the Custom body's OWN un-retargeted copy of the same
+  // clip, which stays low the whole time — this is specific to the retargeted position track, not
+  // the source animation). Rather than debug retarget.js's translation math under time pressure,
+  // captured here once: the pelvis's own BIND-pose LOCAL Y (its neutral standing height) — used in
+  // updateFigure to force an Operator's pelvis down to a fixed fraction of that while crouching,
+  // the same "override broken data with a known-good reference" approach already used for the
+  // upper body and legs above, just applied to a position instead of a rotation.
+  const pelvisBindLocalY = bones.pelvis ? bones.pelvis.position.y : null;
 
   // Aim anchor: a group whose ORIENTATION is fixed relative to the character (forward, or along
   // the body when prone) and whose POSITION follows the chest bone (see updateFigure). Parenting
@@ -385,7 +399,7 @@ function attachAimAndGuns(model, boneNames) {
     }
     heldGuns.set(weaponId, inst);
   }
-  return { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ };
+  return { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ, pelvisBindLocalY };
 }
 
 export function buildCharacterFigure(id, name, appearanceIn) {
@@ -432,11 +446,11 @@ export function buildCharacterFigure(id, name, appearanceIn) {
   });
 
   const rig = attachAimAndGuns(model);
-  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ } = rig;
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ, pelvisBindLocalY } = rig;
 
   const mixer = new THREE.AnimationMixer(model);
 
-  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, upperBodyBindQ, weaponId: 0, prone: false, crouch: false,
+  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, upperBodyBindQ, pelvisBindLocalY, weaponId: 0, prone: false, crouch: false,
     charId, bodyMesh, bodyMaterial, eyebrowMaterials, dressMeshes: [], isOperator: false, clipsSource: template.clips };
   dressFigure(fig, appearance);
   return fig;
@@ -478,10 +492,10 @@ function buildOperatorFigure(appearance) {
     if (obj.isSkinnedMesh) { allMeshes.push(obj); obj.frustumCulled = false; if (obj.name === loaded.bodyMesh.name) bodyMesh = obj; }
   });
   const rig = attachAimAndGuns(model, QUAT_TO_MIXAMO);
-  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ } = rig;
+  const { bones, aim, aimStand, aimProne, spineBindQ, heldGuns, upperBodyBindQ, pelvisBindLocalY } = rig;
   const mixer = new THREE.AnimationMixer(model);
 
-  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, upperBodyBindQ, weaponId: 0, prone: false, crouch: false,
+  const fig = { root, poseGroup, model, mixer, heldGuns, bones, aim, aimStand, aimProne, spineBindQ, upperBodyBindQ, pelvisBindLocalY, weaponId: 0, prone: false, crouch: false,
     charId: opId, bodyMesh, bodyMaterial: null, eyebrowMaterials: [], dressMeshes: allMeshes.filter((m) => m !== bodyMesh),
     isOperator: true, operatorId: opId, garmentMeshNames: loaded.garmentMeshNames, clipsSource: loaded.clips };
   applyStripClothes(fig, appearance);
@@ -547,6 +561,8 @@ function solveArm(fig, side, target, poleDir, handQuat) {
   aimBone(lower, wristNow, A.clone().addScaledVector(dir, dist).sub(elbowNow).normalize());
   setBoneWorldQuat(hand, handQuat);
 }
+
+const _vFoot = new THREE.Vector3(), _vFoot2 = new THREE.Vector3(); // scratch, reused every frame by the Operator ground clamp below — avoid allocating per figure per frame
 
 // Per-frame: advance the animation (legs/torso), then pose both arms around the equipped gun.
 export function updateFigure(fig, dt) {
@@ -615,6 +631,39 @@ export function updateFigure(fig, dt) {
   if (fig.crouch && !fig.prone && !fig.moving && !fig.isOperator) {
     for (const [l, r] of [['thigh_l', 'thigh_r'], ['calf_l', 'calf_r'], ['foot_l', 'foot_r']]) {
       if (fig.bones[l] && fig.bones[r]) fig.bones[r].quaternion.copy(fig.bones[l].quaternion);
+    }
+  }
+  // Operator ground clamp (see the earlier comment on `pelvisBindLocalY` for the root cause — the
+  // retargeted position track under-lowers the hip during Crouch_Fwd_Loop). First attempt here
+  // forced the pelvis down to a fixed fraction of its bind height directly — measured result was
+  // WORSE in a new way: since the LEG ROTATIONS (correctly retargeted, unlike the position track)
+  // were already tuned assuming the too-high hip, yanking the hip down on top of those same
+  // rotations pushed the feet BELOW ground instead of just closing the gap — over-corrected past
+  // zero. Fixed properly by measuring the actual, current lowest foot each frame (ground truth,
+  // not a guessed target height) and shifting the whole model down by exactly however far that
+  // foot floats above y=0 — this can only ever close a real measured gap, never overshoot below
+  // ground, and needs no assumption about what the "correct" hip height should be.
+  if (fig.isOperator && !fig.fp) {
+    // `!fig.fp` matters: buildFirstPersonRig seats the first-person rig's OWN model.position to a
+    // fixed, deliberately non-zero value once at build time (FP_SHOULDER_MID minus the shoulder
+    // midpoint, to line the arms up with the camera-space anchor) — forcing it back to 0 here every
+    // frame would silently undo that positioning for an Operator's own first-person view. This
+    // clamp only makes sense for a THIRD-PERSON figure (remote players, previews), which is what
+    // it was measured against.
+    //
+    // Always re-baseline to 0 first, every frame — this correction has to be stateless (recomputed
+    // fresh each frame from a known zero point) rather than an accumulating `-=`, otherwise a
+    // correction applied while crouched would silently persist as a leftover offset once the
+    // player stands back up (model.position isn't touched by the mixer, so nothing else would ever
+    // reset it), sinking a standing figure into the ground.
+    fig.model.position.y = 0;
+    if (fig.crouch && !fig.prone && fig.bones.foot_l && fig.bones.foot_r) {
+      fig.model.updateMatrixWorld(true);
+      const groundY = fig.root.position.y;
+      const footLY = fig.bones.foot_l.getWorldPosition(_vFoot).y;
+      const footRY = fig.bones.foot_r.getWorldPosition(_vFoot2).y;
+      const gap = Math.min(footLY, footRY) - groundY;
+      if (gap > 0.01) fig.model.position.y = -gap;
     }
   }
   const grips = GRIPS[fig.weaponId];
