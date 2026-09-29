@@ -576,10 +576,14 @@ export function updateFigure(fig, dt) {
   // fix than either head-only attempt: every corrected joint is pinned to its own neutral bind value
   // (never asked to counter-rotate relative to a neighboring bone that's doing something wild), so no
   // joint's local delta from its neighbor can blow up the way the world-pin's did — there's no
-  // "extreme" rotation being requested anywhere, just "don't move" on five joints. Scoped to crouch
-  // only, same as both prior attempts — walk/idle/sprint were never part of the complaint, and prone
-  // has its own separate straight-body pose (see pickAnimName) that doesn't need this.
-  if (fig.crouch && !fig.prone && fig.upperBodyBindQ) {
+  // "extreme" rotation being requested anywhere, just "don't move" on five joints. Originally
+  // scoped to crouch only — prone was assumed to already use a straight pose (A_TPose) with
+  // nothing to correct. A live screenshot proved that assumption wrong: prone's own head still
+  // ended up pitched sharply down into the ground (chin tucked, not the "looking forward along
+  // the ground" a real prone stance reads as) — same class of "clip carries residual tilt away
+  // from bind pose" issue as crouch had, just not caught before because nobody had rendered it
+  // yet. Same fix, same reasoning, now covers both stances.
+  if ((fig.crouch || fig.prone) && fig.upperBodyBindQ) {
     for (const n of ['spine_01', 'spine_02', 'spine_03', 'neck_01', 'Head']) {
       if (fig.bones[n] && fig.upperBodyBindQ[n]) fig.bones[n].quaternion.copy(fig.upperBodyBindQ[n]);
     }
@@ -624,14 +628,26 @@ export function updateFigure(fig, dt) {
     // correction applied while crouched would silently persist as a leftover offset once the
     // player stands back up (model.position isn't touched by the mixer, so nothing else would ever
     // reset it), sinking a standing figure into the ground.
-    fig.model.position.y = 0;
-    if (fig.crouch && !fig.prone && fig.bones.foot_l && fig.bones.foot_r) {
+    // Corrects on `poseGroup.position`, not `model.position` — poseGroup is what actually carries
+    // the prone flatten rotation (poseGroup.rotation.x, set in animateRemoteFigure), and a position
+    // set on it is expressed in ITS PARENT's (root's) frame, evaluated BEFORE that rotation applies.
+    // So `.y` here always means real vertical displacement, standing, crouching, or flattened prone
+    // alike — no need to track which local axis happens to point "up" for a given pose (the old
+    // prone-only version of this got that wrong exactly once — mid-crossfade — and then cached the
+    // bad value forever; this fixes both problems by not caching anything and not caring about axes).
+    fig.poseGroup.position.y = 0;
+    if (fig.prone) {
+      fig.poseGroup.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(fig.model);
+      const gap = box.min.y - fig.root.position.y - 0.02; // 0.02 = small ground clearance, matches the old prone-only version's own constant
+      fig.poseGroup.position.y = -gap;
+    } else if (fig.crouch && fig.bones.foot_l && fig.bones.foot_r) {
       fig.model.updateMatrixWorld(true);
       const groundY = fig.root.position.y;
       const footLY = fig.bones.foot_l.getWorldPosition(_vFoot).y;
       const footRY = fig.bones.foot_r.getWorldPosition(_vFoot2).y;
       const gap = Math.min(footLY, footRY) - groundY;
-      if (gap > 0.01) fig.model.position.y = -gap;
+      if (gap > 0.01) fig.poseGroup.position.y = -gap;
     }
   }
   const grips = GRIPS[fig.weaponId];
@@ -1007,31 +1023,18 @@ function animateRemoteFigure(rp, dt) {
   // prone figure in and out of the ground as the player's own aim direction changed. Two separate
   // objects, each with exactly one rotated axis, avoids that Euler interaction entirely.
   rp.fig.poseGroup.rotation.x += (targetRotX - rp.fig.poseGroup.rotation.x) * lerpT;
-  // Ground-clamp: rotating a standing pose flat around the FEET doesn't actually guarantee the
-  // resulting horizontal body sits exactly at ground level (found by rendering it: the head measured
-  // ~2cm BELOW y=0, a real clip-through-the-floor bug, not just a rounding nicety). Measured once per
-  // figure the first time it goes prone (the pose held while prone is fixed — A_TPose, see
-  // pickAnimName — so the shape doesn't change frame to frame, no need to remeasure every frame) via
-  // the figure's own actual bounding box rather than a guessed constant, so it stays correct for
-  // every body/proportions, Custom or Operator alike. Applied on model.position.Z, not .y: once
-  // poseGroup is rotated -90° about X, ITS local Z axis is what now points along world Y (checked by
-  // hand: rotating the local basis vector (0,0,1) by Rx(-90°) lands on world (0,1,0)) — model.position
-  // is expressed in poseGroup's own local frame, so that's the axis a "move it up in the real world"
-  // offset has to go on.
-  if (rp.prone) {
-    if (rp.fig.proneGroundOffset === undefined) {
-      const savedRotX = rp.fig.poseGroup.rotation.x;
-      rp.fig.poseGroup.rotation.x = -Math.PI / 2; // measure against the pose's FINAL rotated state, not wherever the lerp currently sits
-      rp.fig.poseGroup.updateMatrixWorld(true);
-      const box = new THREE.Box3().setFromObject(rp.fig.model);
-      rp.fig.proneGroundOffset = -box.min.y + 0.02;
-      rp.fig.poseGroup.rotation.x = savedRotX;
-    }
-    rp.fig.model.position.z += (rp.fig.proneGroundOffset - rp.fig.model.position.z) * lerpT;
-  } else if (rp.fig.model.position.z !== 0) {
-    rp.fig.model.position.z += (0 - rp.fig.model.position.z) * lerpT;
-    if (Math.abs(rp.fig.model.position.z) < 0.001) rp.fig.model.position.z = 0;
-  }
+  // Ground-clamp for prone used to live here as a one-time-cached model.position.Z offset,
+  // measured the first time a figure went prone. Real bug (live screenshot: an Operator floating
+  // well off the ground while prone): that one-time measurement could land mid-crossfade (the
+  // 0.25s blend from whatever clip was playing into A_TPose isn't necessarily done yet the very
+  // first frame `rp.prone` goes true), baking in a wrong offset that then stayed cached forever
+  // for that figure. Replaced with the same continuous, every-frame ground clamp updateFigure now
+  // applies for crouch — see that function's own comment — extended to cover prone too and moved
+  // onto `poseGroup.position` instead of `model.position`, since poseGroup is what actually carries
+  // the prone rotation: a position set on poseGroup is expressed in ITS PARENT's (root's) frame,
+  // before that rotation is applied, so `.y` means real vertical displacement regardless of whether
+  // the figure is standing, crouching, or rotated flat — no more needing to track which local axis
+  // happens to point "up" for a given pose.
 }
 
 // Called once per frame from the bootstrap's animate() — lerps every remote figure toward its
