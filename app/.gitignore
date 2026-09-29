@@ -1,0 +1,13 @@
+# Standard Android/Gradle build output - only source + the committed release APK (see
+# releases/) belong in git.
+*.iml
+.gradle/
+.idea/
+local.properties
+.DS_Store
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk.idsig

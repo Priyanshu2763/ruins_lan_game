@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- The game itself is mouse/touch driven, no camera/mic features today - not requested. -->
+
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.Wreckveil"
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="false">
+
+        <!--
+          This app is currently just an outer container: a splash screen (placeholder, real
+          branding to follow) and a full-screen WebView pointed at the live game
+          (see MainActivity.GAME_URL). No native game logic lives here — the whole game keeps
+          running exactly as it does in a desktop browser, this just gives it an installable,
+          app-icon-on-the-home-screen wrapper.
+        -->
+        <activity
+            android:name=".SplashActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Wreckveil.Splash"
+            android:screenOrientation="userLandscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="userLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Wreckveil" />
+
+    </application>
+</manifest>
