@@ -344,19 +344,11 @@ function attachAimAndGuns(model, boneNames) {
   // (thigh/calf/foot, untouched here) actually do the crouching, dropping the character's height.
   const upperBodyBindQ = {};
   for (const n of ['spine_01', 'spine_02', 'spine_03', 'neck_01', 'Head']) upperBodyBindQ[n] = bones[n] && bones[n].quaternion.clone();
-  // Real bug, found from a live user screenshot (an Operator's crouch-WALK visibly levitating,
-  // much worse than the small Custom-body foot gap fixed above): retarget.js's own hip-position
-  // retargeting (the VectorKeyframeTrack it builds for the hips bone) measures correctly against
-  // Crouch_Idle_Loop but effectively doesn't lower the hip at all for Crouch_Fwd_Loop — measured
-  // directly on a live figure: pelvis world Y sat at ~0.98 while crouch-walking, barely different
-  // from a normal standing hip height for a 1.82-unit-tall figure, instead of dropping the ~40%
-  // a real crouch needs (confirmed correct on the Custom body's OWN un-retargeted copy of the same
-  // clip, which stays low the whole time — this is specific to the retargeted position track, not
-  // the source animation). Rather than debug retarget.js's translation math under time pressure,
-  // captured here once: the pelvis's own BIND-pose LOCAL Y (its neutral standing height) — used in
-  // updateFigure to force an Operator's pelvis down to a fixed fraction of that while crouching,
-  // the same "override broken data with a known-good reference" approach already used for the
-  // upper body and legs above, just applied to a position instead of a rotation.
+  // The pelvis's own bind-pose LOCAL Y (its neutral standing height). Not currently read anywhere —
+  // an early attempt at the crouch ground-clamp in updateFigure used this to force the hip down to a
+  // fixed fraction of it, which over-corrected (pushed feet below ground, see updateFigure's own
+  // history comment on the crouch clamp for the full story); replaced with a measured-foot-vs-ground
+  // approach that doesn't need this. Left captured since it's cheap and may be useful again.
   const pelvisBindLocalY = bones.pelvis ? bones.pelvis.position.y : null;
 
   // Aim anchor: a group whose ORIENTATION is fixed relative to the character (forward, or along
@@ -592,64 +584,40 @@ export function updateFigure(fig, dt) {
       if (fig.bones[n] && fig.upperBodyBindQ[n]) fig.bones[n].quaternion.copy(fig.upperBodyBindQ[n]);
     }
   }
-  // Real bug, found via live measurement (not eyeballing): the stock Crouch_Idle_Loop clip itself
-  // bakes in a lopsided stance — the right foot sits ~8cm above the left foot's height (and above
-  // where it sits in the standing pose) for the ENTIRE idle hold, not a passing mid-stride moment —
-  // measured directly (world-space foot bone Y sampled across the whole ~2.9s clip, both legs'
-  // heights basically constant the whole time). That's a real gap between sole and floor, exactly
-  // what reads as "floating"/"walking on air" while just standing still crouched. This is baked into
-  // the third-party clip's own keyframes (reproduces identically on a Custom body, which never goes
-  // through retargeting at all, so it isn't a retargeting bug either) — not something worth trying to
-  // re-author. Fix, same spirit as the upper-body correction just above (override the broken part
-  // with a known-good reference instead of algebraically patching it): while idle-crouching (never
-  // while crouch-WALKING, which has its own legitimate alternating stride — see the `!fig.moving`
-  // guard), mirror the LEFT leg's own current local rotation onto the RIGHT leg's matching bones each
-  // frame. The left leg's pose is already correctly grounded (measured: matches its own standing
-  // height), and this rig's left/right bone pairs share the convention (standard for this UE-
-  // mannequin-derived skeleton, see retarget.js's own note on both rigs sharing topology) where the
-  // same local quaternion on the mirrored bone produces a mirrored, still-anatomically-correct pose —
-  // so this reads as a clean, symmetric, fully-grounded crouch stance instead of copying broken data.
+  // Crouch ground clamp — ONE mechanism for both body types (history below; the short version is
+  // two earlier, body-specific attempts both turned out incomplete or unsafe, so this replaces
+  // both rather than sitting alongside them).
   //
-  // Measured result: closes most but not quite all of the gap (~8cm down to ~3-4cm) — the clip also
-  // bakes a slight pelvis roll into the same weight-shift, which a leg-only mirror can't fully cancel
-  // since both legs still hang off a not-quite-level hip. Tried also resetting `pelvis` to its bind
-  // rotation the same way the torso bones above do — measured result was WORSE, not better: it made
-  // both feet perfectly symmetric again but raised BOTH up to ~0.28-0.31 (vs the correct ~0.103),
-  // because the clip's forward pelvis tilt is part of what pushes the correctly-grounded LEFT leg
-  // down that low in the first place — leveling it lifted the whole stance. Reverted; left as the
-  // smaller, asymmetric-but-far-closer residual gap rather than a symmetric-but-worse one.
+  // Round 1 (Custom only): the stock Crouch_Idle_Loop clip bakes in a lopsided stance — the right
+  // foot sits ~8cm above the left/above its own standing height for the whole idle hold (measured:
+  // world-space foot Y sampled across the whole ~2.9s clip, essentially flat the whole time). Fixed
+  // by mirroring the left leg's local rotation onto the right each frame while idle-crouching —
+  // closed most but not all of the gap (a baked pelvis roll a leg-only mirror can't fully cancel).
   //
-  // Real regression, caught from a live screenshot right after this shipped: on an Operator body
-  // (mixamorig skeleton, retargeted clip — see retarget.js) this collapsed the WHOLE figure into a
-  // twisted heap instead of just fixing a foot. Only ever measured/verified against a Custom body's
-  // un-retargeted clip; never checked an Operator's LEFT leg was even correctly grounded to begin
-  // with before mirroring it onto the right — if it wasn't (plausible: a different clip, a different
-  // retargeted bind pose, this rig's own asymmetry), copying it doubles down on whatever was already
-  // wrong there instead of fixing anything. Scoped to Custom bodies only until an Operator is
-  // actually measured the same way (see the git history around this line for the exact numbers that
-  // justified doing it for Custom).
-  if (fig.crouch && !fig.prone && !fig.moving && !fig.isOperator) {
-    for (const [l, r] of [['thigh_l', 'thigh_r'], ['calf_l', 'calf_r'], ['foot_l', 'foot_r']]) {
-      if (fig.bones[l] && fig.bones[r]) fig.bones[r].quaternion.copy(fig.bones[l].quaternion);
-    }
-  }
-  // Operator ground clamp (see the earlier comment on `pelvisBindLocalY` for the root cause — the
-  // retargeted position track under-lowers the hip during Crouch_Fwd_Loop). First attempt here
-  // forced the pelvis down to a fixed fraction of its bind height directly — measured result was
-  // WORSE in a new way: since the LEG ROTATIONS (correctly retargeted, unlike the position track)
-  // were already tuned assuming the too-high hip, yanking the hip down on top of those same
-  // rotations pushed the feet BELOW ground instead of just closing the gap — over-corrected past
-  // zero. Fixed properly by measuring the actual, current lowest foot each frame (ground truth,
-  // not a guessed target height) and shifting the whole model down by exactly however far that
-  // foot floats above y=0 — this can only ever close a real measured gap, never overshoot below
-  // ground, and needs no assumption about what the "correct" hip height should be.
-  if (fig.isOperator && !fig.fp) {
+  // Round 2 (Operator only): applying that SAME mirror to an Operator (mixamorig, retargeted)
+  // collapsed the whole figure into a twisted heap — its left leg was never verified correctly
+  // grounded to begin with, so mirroring it doubled down on whatever was already wrong. Replaced
+  // with an Operator-only fix instead: retarget.js's hip POSITION track barely lowers the hip at
+  // all during Crouch_Fwd_Loop (measured: hip stayed near standing height, unlike the same source
+  // clip played un-retargeted on a Custom body, which grounds correctly) — fixed by measuring the
+  // actual lowest foot each frame and shifting the model down by exactly that gap.
+  //
+  // Round 3 (this one): a live report that Custom STILL floats while crouch-WALKING (Round 1 only
+  // ever covered Custom's IDLE clip — Crouch_Fwd_Loop was never actually measured or fixed for
+  // Custom at all) made clear the ground-truth foot-clamp from round 2 isn't Operator-specific
+  // logic, it's just the correct fix, full stop — a measured "is the lowest foot above the real
+  // ground" check doesn't care whose rig produced the pose. Replacing BOTH round 1 and round 2's
+  // separate, body-specific patches with this one check for everyone: idle or moving, Custom or
+  // Operator. This is also strictly safer than round 1's mirror ever was — a leg-rotation mirror
+  // could theoretically produce a broken pose on a rig it wasn't tested against (exactly what
+  // happened in round 2); a foot-vs-ground height check has no such failure mode, it only ever
+  // asks "is the lowest point above zero," which is body-shape-agnostic by construction.
+  if (!fig.fp) {
     // `!fig.fp` matters: buildFirstPersonRig seats the first-person rig's OWN model.position to a
     // fixed, deliberately non-zero value once at build time (FP_SHOULDER_MID minus the shoulder
     // midpoint, to line the arms up with the camera-space anchor) — forcing it back to 0 here every
-    // frame would silently undo that positioning for an Operator's own first-person view. This
-    // clamp only makes sense for a THIRD-PERSON figure (remote players, previews), which is what
-    // it was measured against.
+    // frame would silently undo that positioning for a player's own first-person view. This clamp
+    // only makes sense for a THIRD-PERSON figure (remote players, previews).
     //
     // Always re-baseline to 0 first, every frame — this correction has to be stateless (recomputed
     // fresh each frame from a known zero point) rather than an accumulating `-=`, otherwise a

@@ -25,7 +25,15 @@ const GARMENT_MESHES = {
 };
 export function canStripClothes(id) { return CAN_STRIP_CLOTHES.has(id); }
 
-const CLIP_NAMES = ['Idle_Loop', 'Walk_Loop', 'Sprint_Loop', 'Crouch_Idle_Loop', 'Crouch_Fwd_Loop'];
+// Real bug, found from a live screenshot (an Operator lying prone came out curled into a fetal
+// shape instead of flat): 'A_TPose' — the straight-legged base pose characters.js's pickAnimName
+// deliberately picks for prone specifically because it lies flat cleanly (Idle_Loop's own natural
+// knee bend/weight shift folds into a curl once rotated flat, A_TPose's straight legs don't) —
+// was never in this list, so it was never retargeted for Operators at all. `clipsSource.get(name)`
+// (setRemoteAnim, characters.js) came back undefined for every prone Operator and just left
+// whatever animation was already playing (Idle_Loop, Crouch_Idle_Loop, ...) running — exactly the
+// curled shape reported, not a coincidence.
+const CLIP_NAMES = ['Idle_Loop', 'Walk_Loop', 'Sprint_Loop', 'Crouch_Idle_Loop', 'Crouch_Fwd_Loop', 'A_TPose'];
 const TARGET_HEIGHT = 1.82; // matches the Quaternius bodies (see characters.js) so the same world scale/camera height applies
 
 const fbxLoader = new FBXLoader();
