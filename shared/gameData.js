@@ -34,7 +34,17 @@ export const CROUCH_EYE_HEIGHT = 1.15;
 export const PRONE_EYE_HEIGHT = 0.45;
 // Still used for prone's overall hit-cylinder height (torso/legs coverage) — see HEAD_CENTER_Y
 // below for the actual head geometry, which prone no longer derives from this offset.
-export const PRONE_HEAD_OFFSET = 0.35;
+// Real bug, found from a live report ("shoot the head while prone, it whiffs every time, legs
+// register fine") and confirmed by directly measuring the actual rendered prone figure
+// (characters.js's ground-clamp fix, same session): the old value (0.35, an overall ceiling of
+// only 0.55 above the ground) left the hitbox stopping well BELOW where the body actually is —
+// measured a Custom body's own bounding box while prone (settled, not mid-transition) topping
+// out at 0.81, a full quarter-unit of real torso/head/arm sitting completely outside the old
+// hitbox. Same class of bug as the standing/crouch headshot whiff fixed earlier (see
+// HEAD_CENTER_Y's own comment below) — a hitbox that stops short of the visible model reads as
+// "the hitbox is somewhere else, beside the body." Raised with real margin above the measured
+// 0.81, not just enough to exactly reach it.
+export const PRONE_HEAD_OFFSET = 0.75;
 // The head hitbox used to be independently-tuned offsets (STAND_HEAD_OFFSET=1.5,
 // CROUCH_HEAD_OFFSET=1.0) that had drifted away from what the client actually renders — the
 // visual head is a 0.32 box centered at HEAD_CENTER_Y, so its real top is HEAD_CENTER_Y+HEAD_HALF
