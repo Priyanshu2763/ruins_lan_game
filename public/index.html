@@ -409,6 +409,10 @@
   #tcChatBtn { top: 128px; left: 10px; } /* directly under the mobile-shrunk minimap's box (top:10px + height:110px + gap, see @media below) */
   #tcDoneBtn { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); padding: 8px 22px; border-radius: 6px; border: 1px solid #b3924a; background: rgba(42,36,20,0.95); color: #e8c65a; font-weight: 700; z-index: 4; }
   .tcCustomizing .tcBtn, .tcCustomizing .tcJoystickBase { outline: 2px dashed #e8c65a; outline-offset: 2px; }
+  /* minimap/weaponBar live outside #touchControls, so they can't be reached by the descendant
+     selector above — body.tcCustomizing (set by touchLayout.js's enterCustomizeMode) instead. */
+  body.tcCustomizing #minimap, body.tcCustomizing #weaponBar,
+  body.tcCustomizing #tcChatBtn, body.tcCustomizing #tcStatsBtn { outline: 2px dashed #e8c65a; outline-offset: 2px; }
   /* Stronger, distinct highlight for whichever ONE control is currently selected for resizing —
      needs to read as clearly different from every other control's generic "you're in edit mode,
      you COULD drag this" dashed outline above. */
@@ -440,11 +444,13 @@
        bottom of the stack — still fully repositionable via the customize mode regardless. Tested
        at 844x390 (a representative small landscape phone height); a taller device only gains
        clearance, never loses it, but this is still a first pass worth a real-device glance. */
-    #minimap { top: 6px; left: 6px; width: 80px; height: 80px; }
-    #tcChatBtn { top: 92px; left: 6px; width: 36px; height: 36px; }
-    /* Moved off dead-center (where it sat directly on top of #matchTimer, per a live report) to
-       beside the minimap instead — same top as the map, just to its right. */
-    #tcStatsBtn { top: 6px; left: 92px; width: 36px; height: 36px; transform: none; }
+    /* Position (top/left/right/bottom) and scale for minimap/tcChatBtn/tcStatsBtn/weaponBar are
+       now set by touchLayout.js (registered via makeDraggable in touchControls.js, same system
+       as the 7 action buttons + joystick) — these rules keep only the BASE size each one scales
+       from, since applyPosition() never touches width/height, only position + a scale transform. */
+    #minimap { width: 80px; height: 80px; pointer-events: auto; } /* needed for makeDraggable's pointer events to reach it at all — safe unconditionally since that handler already no-ops outside customize mode, same as #weaponBar below */
+    #tcChatBtn { width: 36px; height: 36px; }
+    #tcStatsBtn { width: 36px; height: 36px; }
     #roomTag { display: none; } /* not critical during play; the dashboard already shows room info, and this column has no room to spare */
     #chatLog { top: 132px; left: 6px; bottom: auto; width: 190px; max-height: 55px; }
     #chatInput { top: 132px; left: 6px; bottom: auto; width: 190px; }
@@ -464,7 +470,7 @@
        bindWeaponCards()'s delegated listener silently never fired. Scoped strictly inside this
        @media block so desktop's #hud stays exactly as inert as it's always been; only mobile
        opts back into real clicks here. */
-    #weaponBar { right: 16px; bottom: 260px; gap: 5px; pointer-events: auto; }
+    #weaponBar { gap: 5px; pointer-events: auto; }
     #weaponBar #grenadeCard { display: none; }
     .weaponCard { width: 52px; padding: 4px 3px; }
     .weaponCard .wImg { max-width: 42px; max-height: 20px; }

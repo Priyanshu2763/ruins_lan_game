@@ -9,12 +9,14 @@
 // `scale` (1 = default size) rides along in the same per-key object as anchor/x/y — reuses the
 // exact same persistence pipeline (localStorage cache + per-account server sync via
 // syncToServer/applyServerTouchLayout in touchLayout.js) with zero new plumbing, so a resized
-// button survives a restart/reinstall/new-device login the same way a repositioned one already
-// did. Included on `joystick` too for schema uniformity even though the BGMI-style resize slider
-// (touchLayout.js's selectControl) deliberately excludes it from being selectable for now — its
-// drag RADIUS (touchControls.js's bindJoystick) is a fixed pixel constant independent of this
-// scale, so resizing it visually would desync the knob's travel distance from the base's own
-// drawn size without also reworking that math, which wasn't asked for.
+// control survives a restart/reinstall/new-device login the same way a repositioned one already
+// did. `joystick` IS resizable (touchControls.js's bindJoystick derives its drag RADIUS from the
+// base's own live post-transform size, and compensates the knob's own translate for the parent
+// transform's compounding — see that function's comments — so the two never desync).
+//
+// minimap/weaponBar/stats/chat: on-screen size at the CURRENT actual DOM/CSS size these controls
+// already render at in touch mode (mobile @media block) — scale is a multiplier ON TOP of that,
+// same convention as every other control, not a replacement pixel size.
 export const DEFAULT_TOUCH_LAYOUT = {
   joystick: { anchor: 'bl', x: 95,  y: 110, scale: 1 },
   fire:     { anchor: 'br', x: 70,  y: 95,  scale: 1 },
@@ -24,11 +26,15 @@ export const DEFAULT_TOUCH_LAYOUT = {
   reload:   { anchor: 'br', x: 70,  y: 200, scale: 1 },
   grenade:  { anchor: 'br', x: 225, y: 130, scale: 1 },
   ads:      { anchor: 'br', x: 295, y: 95,  scale: 1 },
+  minimap:  { anchor: 'tl', x: 6,   y: 6,   scale: 1 },
+  weaponBar:{ anchor: 'br', x: 16,  y: 260, scale: 1 },
+  stats:    { anchor: 'tl', x: 92,  y: 6,   scale: 1 },
+  chat:     { anchor: 'tl', x: 6,   y: 92,  scale: 1 },
   lookZoneLeftPct: 34,
 };
 
 const ANCHORS = new Set(['bl', 'br', 'tl', 'tr']);
-const CONTROL_KEYS = ['joystick', 'fire', 'jump', 'crouch', 'prone', 'reload', 'grenade', 'ads'];
+const CONTROL_KEYS = ['joystick', 'fire', 'jump', 'crouch', 'prone', 'reload', 'grenade', 'ads', 'minimap', 'weaponBar', 'stats', 'chat'];
 
 // Unknown keys are dropped, bad shapes fall back to the default for that one control (not the
 // whole layout) — a corrupt/tampered single entry shouldn't cost the player their entire saved

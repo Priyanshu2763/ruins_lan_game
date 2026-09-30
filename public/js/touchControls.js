@@ -84,6 +84,15 @@ function buildTouchControls() {
   bindAds(adsBtn);
   bindWeaponCards();
 
+  // minimap/weaponBar are static elements already in index.html (used on desktop too, where
+  // they're never draggable/resizable — makeDraggable's own pointerdown/drag logic already
+  // no-ops whenever state.touchCustomizing is false, so registering them here has zero effect
+  // outside an active touch customize session). Registered as a whole GROUP each (all 4/5 weapon
+  // cards move+resize together as one unit, not individually — a per-card control would mean
+  // dragging 4 separate tiny targets for one HUD element).
+  makeDraggable(document.getElementById('minimap'), 'minimap');
+  makeDraggable(document.getElementById('weaponBar'), 'weaponBar');
+
   // ---- Pause + chat (small, top-area utility buttons; not part of the draggable BGMI cluster) ----
   const pauseBtn = document.createElement('button');
   pauseBtn.id = 'tcPauseBtn';
@@ -101,6 +110,7 @@ function buildTouchControls() {
   chatBtn.type = 'button';
   chatBtn.textContent = '💬';
   root.appendChild(chatBtn);
+  makeDraggable(chatBtn, 'chat');
   chatBtn.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     if (state.touchCustomizing) return;
@@ -131,6 +141,7 @@ function buildTouchControls() {
   statsBtn.type = 'button';
   statsBtn.textContent = '📊';
   root.appendChild(statsBtn);
+  makeDraggable(statsBtn, 'stats');
   statsBtn.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     if (state.touchCustomizing) return;
@@ -203,7 +214,10 @@ function makeButton(id, sizeClass, label) {
 // Pushing past ~75% of the base's radius also adds ShiftLeft (sprint), matching how
 // shiftActive already reads state.keys.has('ShiftLeft') today. ----
 function bindJoystick(base, knob) {
-  const RADIUS = 48; // px the knob can travel from center before clamping
+  const BASE_SIZE = 120; // .tcJoystickBase's own default CSS width/height (index.html) — used
+  // below to derive the joystick's CURRENT live scale factor from the base's measured
+  // (post-transform) rect, now that it's resizable like every other control (touchLayout.js).
+  const RADIUS_RATIO = 0.4; // 48/120 — the original fixed relationship between base size and max knob travel, preserved so resizing doesn't change how "far" a full push feels relative to the base's own size
   const SPRINT_THRESHOLD = 0.75;
   let pointerId = null;
   const clearKeys = () => { for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft']) state.keys.delete(k); };
@@ -228,13 +242,20 @@ function bindJoystick(base, knob) {
   base.addEventListener('pointercancel', end);
 
   function updateFromEvent(e) {
-    const rect = base.getBoundingClientRect();
+    const rect = base.getBoundingClientRect(); // already reflects the base's current CSS transform:scale, if any
+    const scale = rect.width / BASE_SIZE;
+    const RADIUS = rect.width * RADIUS_RATIO; // real screen-pixel clamp threshold — scales with the base's current visual size, since `dist` below is measured in real screen pixels too
     const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
     let dx = e.clientX - cx, dy = e.clientY - cy;
     const dist = Math.hypot(dx, dy);
     const clamped = Math.min(dist, RADIUS);
     const angle = Math.atan2(dy, dx);
-    knob.style.transform = `translate(${Math.cos(angle) * clamped}px, ${Math.sin(angle) * clamped}px)`;
+    // Divided by `scale` to cancel out CSS transform compounding: the knob is a CHILD of the
+    // (possibly scaled) base, so a transform set directly on the knob is computed in the base's
+    // own LOCAL pre-scale space and then the whole result gets re-scaled by the base's own
+    // transform when rendered. Without this division, a resized joystick's knob would visually
+    // overshoot (if grown) or undershoot (if shrunk) the on-screen distance this math intends.
+    knob.style.transform = `translate(${(Math.cos(angle) * clamped) / scale}px, ${(Math.sin(angle) * clamped) / scale}px)`;
 
     clearKeys();
     const norm = dist === 0 ? 0 : Math.min(1, dist / RADIUS);

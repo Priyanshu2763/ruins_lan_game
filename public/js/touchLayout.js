@@ -133,9 +133,10 @@ export function makeDraggable(el, key) {
     drag = null;
     saveTouchLayout(liveLayout);
     // A tap (no real drag) selects this control for the BGMI-style size slider instead of
-    // repositioning it — the joystick is excluded (see DEFAULT_TOUCH_LAYOUT's own comment on why
-    // it isn't resizable yet), so tapping it still only ever drags, never selects.
-    if (wasTap && key !== 'joystick') selectControl(key);
+    // repositioning it. Only reachable while state.touchCustomizing is true (see the pointerdown
+    // handler above) — bindJoystick's own pointerdown/pointermove handlers already no-op during
+    // customize mode, so this never fires during a real gameplay joystick touch.
+    if (wasTap) selectControl(key);
   };
   el.addEventListener('pointerup', end);
   el.addEventListener('pointercancel', end);
@@ -201,11 +202,17 @@ export function enterCustomizeMode() {
   state.touchCustomizing = true;
   const root = document.getElementById('touchControls');
   if (root) root.classList.add('tcCustomizing');
+  // Also on <body> — minimap/weaponBar live OUTSIDE #touchControls (minimap is a standalone
+  // canvas, weaponBar is inside #hud), so the existing `.tcCustomizing X` descendant-selector CSS
+  // (index.html) can never reach them via the #touchControls class alone. body-level classing
+  // gives their own selectors somewhere to hook into without disturbing the original mechanism.
+  document.body.classList.add('tcCustomizing');
   const done = document.getElementById('tcDoneBtn');
   if (done) done.hidden = false;
 }
 export function exitCustomizeMode() {
   state.touchCustomizing = false;
+  document.body.classList.remove('tcCustomizing');
   deselectControl(); // hides the size slider and clears the selected-control highlight for next time
   // Real bug found via user report: customize mode was reachable from the pause menu, whose OWN
   // "Edit Touch Controls" button already set state.controlsActive = false as part of pausing (see
