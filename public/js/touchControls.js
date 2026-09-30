@@ -84,14 +84,20 @@ function buildTouchControls() {
   bindAds(adsBtn);
   bindWeaponCards();
 
-  // minimap/weaponBar are static elements already in index.html (used on desktop too, where
-  // they're never draggable/resizable — makeDraggable's own pointerdown/drag logic already
-  // no-ops whenever state.touchCustomizing is false, so registering them here has zero effect
-  // outside an active touch customize session). Registered as a whole GROUP each (all 4/5 weapon
-  // cards move+resize together as one unit, not individually — a per-card control would mean
-  // dragging 4 separate tiny targets for one HUD element).
+  // minimap is a static element already in index.html (used on desktop too, where it's never
+  // draggable/resizable — makeDraggable's own pointerdown/drag logic already no-ops whenever
+  // state.touchCustomizing is false, so registering it here has zero effect outside an active
+  // touch customize session).
   makeDraggable(document.getElementById('minimap'), 'minimap');
-  makeDraggable(document.getElementById('weaponBar'), 'weaponBar');
+  // weaponBar was also wired into this system, but a live report ("can't drag the cards AND
+  // weapon switching stopped responding entirely") couldn't be confidently root-caused — a
+  // second pointerdown listener sharing the element with bindWeaponCards()'s own tap-to-switch
+  // listener was the working theory, but reproducing it live kept getting confounded by an
+  // unrelated headless-testing artifact (the (pointer:coarse) media query not matching CDP's
+  // device-metrics override the way a real touchscreen does, which independently breaks the
+  // pointer-events:auto this needs). Reverted to fully static per the user's own fallback
+  // instruction rather than risk shipping an unconfirmed fix — see shared/touchLayout.js and
+  // index.html's @media block for the matching revert on the data/CSS side.
 
   // ---- Pause + chat (small, top-area utility buttons; not part of the draggable BGMI cluster) ----
   const pauseBtn = document.createElement('button');

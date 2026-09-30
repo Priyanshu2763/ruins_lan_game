@@ -14,9 +14,16 @@
 // base's own live post-transform size, and compensates the knob's own translate for the parent
 // transform's compounding — see that function's comments — so the two never desync).
 //
-// minimap/weaponBar/stats/chat: on-screen size at the CURRENT actual DOM/CSS size these controls
-// already render at in touch mode (mobile @media block) — scale is a multiplier ON TOP of that,
-// same convention as every other control, not a replacement pixel size.
+// minimap/stats/chat: on-screen size at the CURRENT actual DOM/CSS size these controls already
+// render at in touch mode (mobile @media block) — scale is a multiplier ON TOP of that, same
+// convention as every other control, not a replacement pixel size.
+//
+// weaponBar was tried here too but reverted — a live report ("can't drag the cards, weapon
+// switching stopped responding") couldn't be confidently root-caused (see touchControls.js's own
+// comment on why), so it went back to being a fully static element per the user's own fallback
+// instruction rather than ship an unconfirmed fix. `weaponBar` is deliberately NOT in
+// CONTROL_KEYS below — any already-saved layout with that key just has it silently dropped by
+// sanitizeTouchLayout, same as it already does for any other unrecognized field.
 export const DEFAULT_TOUCH_LAYOUT = {
   joystick: { anchor: 'bl', x: 95,  y: 110, scale: 1 },
   fire:     { anchor: 'br', x: 70,  y: 95,  scale: 1 },
@@ -27,14 +34,13 @@ export const DEFAULT_TOUCH_LAYOUT = {
   grenade:  { anchor: 'br', x: 225, y: 130, scale: 1 },
   ads:      { anchor: 'br', x: 295, y: 95,  scale: 1 },
   minimap:  { anchor: 'tl', x: 6,   y: 6,   scale: 1 },
-  weaponBar:{ anchor: 'br', x: 16,  y: 260, scale: 1 },
   stats:    { anchor: 'tl', x: 92,  y: 6,   scale: 1 },
   chat:     { anchor: 'tl', x: 6,   y: 92,  scale: 1 },
   lookZoneLeftPct: 34,
 };
 
 const ANCHORS = new Set(['bl', 'br', 'tl', 'tr']);
-const CONTROL_KEYS = ['joystick', 'fire', 'jump', 'crouch', 'prone', 'reload', 'grenade', 'ads', 'minimap', 'weaponBar', 'stats', 'chat'];
+const CONTROL_KEYS = ['joystick', 'fire', 'jump', 'crouch', 'prone', 'reload', 'grenade', 'ads', 'minimap', 'stats', 'chat'];
 
 // Unknown keys are dropped, bad shapes fall back to the default for that one control (not the
 // whole layout) — a corrupt/tampered single entry shouldn't cost the player their entire saved

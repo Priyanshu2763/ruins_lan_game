@@ -411,7 +411,7 @@
   .tcCustomizing .tcBtn, .tcCustomizing .tcJoystickBase { outline: 2px dashed #e8c65a; outline-offset: 2px; }
   /* minimap/weaponBar live outside #touchControls, so they can't be reached by the descendant
      selector above — body.tcCustomizing (set by touchLayout.js's enterCustomizeMode) instead. */
-  body.tcCustomizing #minimap, body.tcCustomizing #weaponBar,
+  body.tcCustomizing #minimap,
   body.tcCustomizing #tcChatBtn, body.tcCustomizing #tcStatsBtn { outline: 2px dashed #e8c65a; outline-offset: 2px; }
   /* Stronger, distinct highlight for whichever ONE control is currently selected for resizing —
      needs to read as clearly different from every other control's generic "you're in edit mode,
@@ -470,7 +470,7 @@
        bindWeaponCards()'s delegated listener silently never fired. Scoped strictly inside this
        @media block so desktop's #hud stays exactly as inert as it's always been; only mobile
        opts back into real clicks here. */
-    #weaponBar { gap: 5px; pointer-events: auto; }
+    #weaponBar { right: 16px; bottom: 260px; gap: 5px; pointer-events: auto; }
     #weaponBar #grenadeCard { display: none; }
     .weaponCard { width: 52px; padding: 4px 3px; }
     .weaponCard .wImg { max-width: 42px; max-height: 20px; }
