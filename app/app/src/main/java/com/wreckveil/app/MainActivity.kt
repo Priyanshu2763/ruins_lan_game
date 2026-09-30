@@ -9,6 +9,8 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
@@ -139,7 +141,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.loadUrl(GAME_URL)
-        setUpSplashVideo()
+        // Delayed, not immediate — a live report ("gun/hands invisible, app-only, works fine in a
+        // phone/PC browser") led to a resource-contention hypothesis: this app's game/gun 3D models
+        // start fetching+decoding the INSTANT the page's JS parses (characters.js fires that load at
+        // module-eval time, before login even), and the splash video's own decode used to start at
+        // the exact same instant — both racing for the same device's GPU/decode resource budget
+        // right at startup, something a plain browser tab showing this page never has to contend
+        // with (no video decode running alongside it there). MediaPlayer.prepareAsync() was already
+        // non-blocking (it never held up the WebView's own thread), so this isn't a threading fix —
+        // it's giving the WebView's heaviest kickoff work (firing ~15 asset requests) a head start
+        // before the video ALSO starts consuming GPU/decode resources, shrinking the overlap instead
+        // of the two starting in a dead heat. Not confirmed against a real device/log — flagged
+        // plainly as a hypothesis-driven mitigation to actually test, not a guaranteed fix.
+        Handler(Looper.getMainLooper()).postDelayed({ setUpSplashVideo() }, 500)
     }
 
     private fun setUpSplashVideo() {
