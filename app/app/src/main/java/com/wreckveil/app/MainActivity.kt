@@ -80,7 +80,12 @@ import androidx.appcompat.app.AppCompatActivity
 class MainActivity : AppCompatActivity() {
     companion object {
         const val GAME_URL = "https://game.antiszn.com"
-        const val LOADING_SCREEN_TIMEOUT_MS = 20000L // never leave the player stuck if progress genuinely stalls
+        // Never leave the player stuck if progress genuinely stalls. Bumped 20s -> 40s once the
+        // web side started waiting for the player's own Operator character too (a separate 5-62MB
+        // file, on top of the ~20MB base template) — 20s was sized for the base template alone,
+        // and a big operator over a real slow mobile connection could plausibly need more room
+        // than that before genuinely finishing, not stalling.
+        const val LOADING_SCREEN_TIMEOUT_MS = 40000L
     }
 
     private lateinit var webView: WebView

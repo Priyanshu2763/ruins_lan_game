@@ -8,6 +8,7 @@ import { mountPreviewInto, resizePreview, setPreviewAppearance, startPreviewLoop
 import { CHARACTERS, SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, SLOTS, MODES, OPERATORS, CAN_STRIP_CLOTHES, sanitizeAppearance } from '/shared/appearance.js';
 import { isTouchDevice, setTouchOverride, getTouchOverride } from './touchDetect.js';
 import { enterCustomizeMode, resetTouchLayout, setTouchLayoutUsername, applyServerTouchLayout } from './touchLayout.js';
+import { whenFullyReady } from './characters.js';
 
 // ---------- DOM ----------
 const authScreen = document.getElementById('authScreen');
@@ -239,6 +240,12 @@ async function loadProfile() {
     applyServerTouchLayout(data.touchLayout); // no-ops (leaves the local/default layout alone) if the account never saved one
     applyServerSettings(data.settings); // same no-op-if-null contract, see settings section below
     playPreviewName.textContent = data.username;
+    // Sends the TRUE final "100%" to the Android app's native loading screen (see characters.js's
+    // loadTemplate/whenFullyReady comments) — the base template alone caps its own reporting at
+    // 95 specifically because it has no way to know this account's appearance; now that we do,
+    // this is what actually unblocks the reveal, waiting for the player's own Operator too if
+    // they use one instead of letting the game show with their own character still missing.
+    whenFullyReady(myAppearance, () => { try { window.AndroidBridge?.onLoadProgress?.(100); } catch { /* harmless */ } });
   } catch (err) {
     // Profile is a nice-to-have on the dashboard, not a gate on playing — a failed fetch just
     // leaves the stat cards at their placeholder '–' rather than blocking anything.

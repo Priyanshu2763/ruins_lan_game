@@ -254,9 +254,18 @@ async function loadTemplate() {
   // Promise.all below has always fetched — tracked here purely for progress reporting, doesn't
   // change what's fetched or in what order, and reuses the array's own natural resolve timing
   // rather than polling/estimating.
+  // Capped at 95, not 100 — this function has no way to know whether the CURRENT player's saved
+  // appearance is an Operator, which is a separate, lazily-loaded 5-60MB file this template
+  // (fired at module load, before login/appearance is even known) never fetches itself. Real bug
+  // found from a live report ("gun/hands invisible AND the dashboard character too"): an earlier
+  // version reported a raw 100 here, which the native app treats as "fully ready, reveal now" —
+  // for an Operator account, that could fire well before the operator's own file finished
+  // loading, revealing the game (and the dashboard preview) with a real character silently still
+  // missing. The true final push to 100 is now whenFullyReady's job (below), which knows about
+  // and waits for the operator too when there is one.
   const total = 5 + gunIds.length + HAIR_FILES.length;
   let done = 0;
-  const track = (p) => p.then((v) => { done++; reportLoadProgress((done / total) * 100); return v; });
+  const track = (p) => p.then((v) => { done++; reportLoadProgress((done / total) * 95); return v; });
   const [maleGltf, femaleGltf, animGltf, maleSkin, femaleSkin, ...rest] = await Promise.all([
     track(gltfLoader.loadAsync(CHARACTER_URLS.male)),
     track(gltfLoader.loadAsync(CHARACTER_URLS.female)),
@@ -978,6 +987,31 @@ export function retryPendingCreates() { for (const args of pendingCreates.splice
 // the same "fire and let every interested listener recheck" shape as onCharacterTemplateReady.
 const operatorReadyCallbacks = [];
 export function onOperatorReady(fn) { operatorReadyCallbacks.push(fn); }
+
+// The authoritative "is this account's own character ACTUALLY ready to be seen" check — used by
+// ui.js to gate the final reportLoadProgress(100) sent to the Android app's native loading screen
+// (see loadTemplate's own comment on why it caps at 95 instead of claiming 100 on its own). Waits
+// for the base template, and — only if the given appearance is an Operator — that SPECIFIC
+// operator's own file too, kicking its load off here if nothing else has started it yet (a
+// dashboard preview mounting later would normally do this, but shouldn't be the only thing that
+// can, since the loading screen needs to know regardless of whether/when a preview pane happens
+// to be visible).
+export function whenFullyReady(appearance, cb) {
+  const needOperator = appearance && appearance.mode === 'operator' ? appearance.operator : null;
+  let operatorDone = !needOperator || !!getLoadedOperator(needOperator);
+  const maybeFire = () => { if (template && operatorDone) cb(); };
+  onceReady(() => {
+    if (needOperator && !operatorDone) {
+      loadOperator(needOperator, () => cloneSkinned(template.scenes.male), template.clips).catch(() => {});
+    }
+    maybeFire();
+  });
+  if (needOperator) {
+    onOperatorReady(() => {
+      if (!operatorDone && getLoadedOperator(needOperator)) { operatorDone = true; maybeFire(); }
+    });
+  }
+}
 onceReady(retryPendingCreates);
 
 export function removeRemote(id) {
