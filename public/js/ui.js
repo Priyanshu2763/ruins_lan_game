@@ -970,12 +970,6 @@ export function hideConn() { connOverlay.hidden = true; }
 // lets the `leave` message flush before the page tears the socket down.
 export function leaveMatchAndReload() {
   leaveConnection();
-  // Undoes the native orientation lock touchControls.js's requestGameFullscreen() applies via
-  // the Android app's AndroidBridge (see MainActivity.kt) — that lock is set on the Activity
-  // itself, so it survives a page reload untouched otherwise, leaving the login/dashboard stuck
-  // in forced landscape after quitting a match (the exact bug already fixed once for the initial
-  // load — this closes the same gap on the way back out). No-op in a normal mobile browser tab.
-  window.AndroidBridge?.unlockOrientation?.();
   setTimeout(() => location.reload(), 120);
 }
 

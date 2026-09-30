@@ -3,24 +3,25 @@ package com.wreckveil.app
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.annotation.SuppressLint
-import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.ConsoleMessage
-import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 
@@ -40,24 +41,26 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
  * loading until after the splash was already done. Merged into one Activity so the WebView starts
  * loading immediately, in parallel with the splash video baked into res/raw/splash.mp4 (a real
  * clip the user supplied, sped up 1.5x — see the app's own scratchpad notes / commit message for
- * the ffmpeg command — kept at its full original frame, not cropped: VideoView's default scaling
- * letterboxes/pillarboxes to show the whole frame instead). The video plays exactly once, then
- * fades out — an earlier version waited for the page to finish loading too and looped the video
- * if it hadn't, which read as a stuck/broken splash on a live device rather than "play then
- * disappear smoothly" as asked; the WebView's own dark background (@color/splash_background)
- * means an still-loading page underneath is never a jarring white flash either way.
+ * the ffmpeg command — kept at its full original frame, not cropped: sizeSplashVideoToAspect below
+ * letterboxes/pillarboxes to show the whole frame instead of stretching or cropping it). The video
+ * plays exactly once, then fades out — an earlier version waited for the page to finish loading
+ * too and looped the video if it hadn't, which read as a stuck/broken splash on a live device
+ * rather than "play then disappear smoothly" as asked.
  *
- * `AndroidBridge` (a @JavascriptInterface) lets the web client (touchControls.js) lock/unlock
- * screen orientation NATIVELY instead of through the browser Fullscreen+Orientation-Lock APIs —
- * added after a live report ("app isn't opening in landscape") traced to those web APIs simply
- * not working inside a bare WebView: `screen.orientation.lock()` is spec-gated behind a successful
- * `Element.requestFullscreen()` first, and generic-element fullscreen in Android WebView requires
- * the host app to implement `WebChromeClient.onShowCustomView`, which this app never did (that
- * callback exists for `<video>` fullscreen, not arbitrary DOM fullscreen) — so the whole chain
- * silently no-ops and the .catch() swallows it. `Activity.requestedOrientation` has no such
- * dependency and just works, so the web client now calls this bridge (in addition to, not instead
- * of, the browser APIs it already tries — harmless where the bridge doesn't exist, i.e. a normal
- * mobile browser tab).
+ * The video is driven through a TextureView + MediaPlayer directly, not the android.widget.
+ * VideoView an earlier version used — VideoView wraps a SurfaceView internally, a genuinely
+ * separate compositor surface that (without an explicit setZOrderOnTop call VideoView doesn't
+ * expose) defaults to sitting BEHIND the window's own content. Layered over the WebView (itself
+ * hardware-accelerated), that meant the video's audio played fine — a separate pipeline,
+ * unaffected — while the picture itself was invisible: a live-reported bug ("sound comes, no
+ * visual"). TextureView is a normal View subclass that composites through the regular view
+ * hierarchy, so it just works on top with no special handling needed.
+ *
+ * screenOrientation is locked to "userLandscape" in the manifest (this is a landscape shooter) —
+ * an earlier attempt unlocked it to fix a real "login buttons unreachable" bug, which traded one
+ * bug for a worse one; that's now fixed properly at the source instead (public/index.html's
+ * `.screen` CSS scrolls instead of clipping when content is taller than the viewport), so the app
+ * can stay landscape-locked throughout.
  */
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -66,24 +69,10 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
-    private lateinit var splashVideo: VideoView
+    private lateinit var splashVideo: TextureView
+    private var mediaPlayer: MediaPlayer? = null
 
     private var revealed = false
-
-    // Exposed to the page as `window.AndroidBridge` — see the class doc comment above for why
-    // this exists instead of relying on the browser's own Fullscreen/Orientation-Lock APIs.
-    // Methods are deliberately narrow (orientation only, no filesystem/data access) since anything
-    // exposed here is callable by whatever content the WebView happens to be showing.
-    private inner class WebAppInterface {
-        @JavascriptInterface
-        fun lockLandscape() {
-            runOnUiThread { requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE }
-        }
-        @JavascriptInterface
-        fun unlockOrientation() {
-            runOnUiThread { requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
-        }
-    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,16 +95,12 @@ class MainActivity : AppCompatActivity() {
         configureWebView(webView.settings)
 
         // Debug builds only: pipes every page console.log/warn/error to `adb logcat` under the
-        // "WreckveilWeb" tag, and turns on chrome://inspect remote DevTools. Added after a live
-        // report ("login/create buttons not working" on a real phone) that turned out to be a
-        // screenOrientation bug — but there was no way to SEE that from here at the time, only
-        // guess from source. Debuggable is checked via the ApplicationInfo flag (not
-        // BuildConfig.DEBUG, which needs buildFeatures.buildConfig turned on in Gradle) so this
-        // needs zero build-config changes and can never accidentally ship enabled in a release build.
+        // "WreckveilWeb" tag, and turns on chrome://inspect remote DevTools. Debuggable is checked
+        // via the ApplicationInfo flag (not BuildConfig.DEBUG, which needs
+        // buildFeatures.buildConfig turned on in Gradle) so this needs zero build-config changes
+        // and can never accidentally ship enabled in a release build.
         val isDebuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         if (isDebuggable) WebView.setWebContentsDebuggingEnabled(true)
-
-        webView.addJavascriptInterface(WebAppInterface(), "AndroidBridge")
 
         webView.webViewClient = object : WebViewClient() {
             // Keep normal navigation (and the auth/dashboard flow, which is all same-origin)
@@ -156,14 +141,54 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setUpSplashVideo() {
-        val uri = Uri.parse("android.resource://$packageName/${R.raw.splash}")
-        splashVideo.setVideoURI(uri)
-        splashVideo.setOnCompletionListener { revealGame() }
-        splashVideo.start()
+        splashVideo.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, availW: Int, availH: Int) {
+                val mp = MediaPlayer()
+                mediaPlayer = mp
+                try {
+                    mp.setSurface(Surface(surface))
+                    val afd = resources.openRawResourceFd(R.raw.splash)
+                    mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                    afd.close()
+                    mp.setOnPreparedListener {
+                        sizeSplashVideoToAspect(mp.videoWidth, mp.videoHeight, availW, availH)
+                        mp.start()
+                    }
+                    mp.setOnCompletionListener { revealGame() }
+                    mp.setOnErrorListener { _, _, _ -> revealGame(); true }
+                    mp.prepareAsync()
+                } catch (e: Exception) {
+                    Log.e("WreckveilSplash", "splash video setup failed, revealing game directly", e)
+                    revealGame()
+                }
+            }
+            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+        }
+    }
+
+    // Resizes the TextureView itself (rather than a transform matrix) to the correctly
+    // letterboxed/pillarboxed size for the video's real aspect ratio within the space available —
+    // layout_gravity="center" (activity_main.xml) then centers it, giving the same
+    // "show the full frame, no cropping" behavior VideoView provided by default.
+    private fun sizeSplashVideoToAspect(videoW: Int, videoH: Int, availW: Int, availH: Int) {
+        if (videoW <= 0 || videoH <= 0 || availW <= 0 || availH <= 0) return
+        val videoAspect = videoW.toFloat() / videoH
+        val availAspect = availW.toFloat() / availH
+        val params = splashVideo.layoutParams
+        if (videoAspect > availAspect) {
+            params.width = availW
+            params.height = (availW / videoAspect).toInt()
+        } else {
+            params.width = (availH * videoAspect).toInt()
+            params.height = availH
+        }
+        splashVideo.layoutParams = params
     }
 
     // Plays exactly once, then fades out to reveal the game loading underneath (which started
-    // loading back in onCreate, in parallel with the video — see the class doc comment).
+    // loading back in onCreate, in parallel with the video).
     private fun revealGame() {
         if (revealed) return
         revealed = true
@@ -172,11 +197,19 @@ class MainActivity : AppCompatActivity() {
             .setDuration(300)
             .setListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
-                    splashVideo.stopPlayback()
+                    releaseMediaPlayer()
                     splashVideo.visibility = View.GONE
                 }
             })
             .start()
+    }
+
+    private fun releaseMediaPlayer() {
+        mediaPlayer?.let {
+            try { it.stop() } catch (e: IllegalStateException) { /* already stopped/released */ }
+            it.release()
+        }
+        mediaPlayer = null
     }
 
     private fun configureWebView(settings: WebSettings) {
@@ -226,7 +259,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        splashVideo.stopPlayback()
+        releaseMediaPlayer()
         super.onDestroy()
     }
 

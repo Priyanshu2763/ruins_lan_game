@@ -27,20 +27,20 @@
           logic lives here — the whole game keeps running exactly as it does in a desktop
           browser, this just gives it an installable, app-icon-on-the-home-screen wrapper.
 
-          screenOrientation is "unspecified" (free sensor rotation, respecting the user's own
-          system rotation-lock setting), not locked — a live report traced "login/create buttons
-          not working" on a real phone to a previous "userLandscape" lock here cramming the login
-          form off the bottom of a short landscape viewport (measured: the Create Account button's
-          bottom edge sat past the bottom of a realistic 780x360 phone viewport). The web client
-          already has its own orientation handling (#rotateOverlay, touchControls.js's
-          screen.orientation.lock('landscape')) that only locks to landscape once a real match
-          starts, leaving menus/login in the phone's natural portrait — exactly what unspecified
-          here lets happen, matching how a normal mobile browser tab already behaves.
+          screenOrientation is "userLandscape" — this is a landscape shooter, the whole app opens
+          in landscape. An earlier attempt fixed a real "login/create buttons not working" report
+          (the auth form's Create Account button sat past the bottom of a short landscape phone
+          viewport, unreachable) by switching this to "unspecified" instead — but that traded one
+          real bug for a worse one (portrait-only, contradicting what the app is meant to be).
+          Fixed properly this time at the actual source: public/index.html's `.screen` CSS now
+          scrolls instead of clipping when its content is taller than the viewport
+          (align-items:safe center + overflow-y:auto — see that file's own comment), so the login
+          form is fully reachable in landscape without needing the Activity itself unlocked.
         -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:screenOrientation="unspecified"
+            android:screenOrientation="userLandscape"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.Wreckveil">
             <intent-filter>

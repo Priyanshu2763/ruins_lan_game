@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The WebView (game) starts loading immediately, underneath a splash video overlay played on
-     top of it — see MainActivity for the "reveal once both the video has played through AND the
-     page has actually finished loading" logic. FrameLayout so the video simply sits on top,
-     no separate splash Activity/transition needed. -->
+     top of it — see MainActivity for the "play once, then fade out" reveal logic. FrameLayout so
+     the video simply sits on top, no separate splash Activity/transition needed.
+
+     The video is a TextureView (MainActivity drives a MediaPlayer into it directly), not the
+     android.widget.VideoView used in an earlier version — VideoView wraps a SurfaceView
+     internally, which is a genuinely separate compositor surface that (without an explicit
+     setZOrderOnTop call VideoView doesn't expose) defaults to sitting BEHIND the window's own
+     content. With a WebView underneath (itself hardware-accelerated), that meant the video's
+     audio played fine (a separate pipeline, unaffected) while the picture itself was invisible —
+     a live-reported bug ("sound comes, no visual"). TextureView is a normal View subclass that
+     composites through the regular view hierarchy, so it just works on top with no special
+     handling needed. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -21,16 +30,12 @@
 
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
-    <!-- VideoView's own default scaling (like ImageView's fitCenter) shows the FULL frame
-         letterboxed/pillarboxed as needed rather than cropping — required, not incidental: the
-         source clip is a 16:9 landscape recording and this app's orientation is free/unspecified
-         (see AndroidManifest's own comment on why), so on a portrait phone this legitimately
-         letterboxes with bars top and bottom rather than cropping the sides off. -->
-    <VideoView
+    <!-- Sized in code (MainActivity.sizeSplashVideoToAspect) to letterbox/pillarbox the full,
+         un-cropped video frame within whatever space is available, centered by this gravity. -->
+    <TextureView
         android:id="@+id/splashVideo"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_gravity="center"
-        android:background="@color/splash_background" />
+        android:layout_gravity="center" />
 
 </FrameLayout>

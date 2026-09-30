@@ -401,15 +401,6 @@ function bindWeaponCards() {
 // exactly "the controls disappear" as reported. Fixed by fullscreening `document.documentElement`
 // (the whole page) instead, so nothing outside the canvas gets hidden.
 function requestGameFullscreen() {
-  // Also try the native Android app bridge (MainActivity.kt's AndroidBridge, exposed only when
-  // this page is running inside the Wreckveil app's WebView) — a live report ("app isn't opening
-  // in landscape") traced to screen.orientation.lock() below silently never working inside a bare
-  // WebView: it's spec-gated behind a successful Element.requestFullscreen() first, and generic
-  // (non-<video>) fullscreen in WebView needs the host app to implement
-  // WebChromeClient.onShowCustomView, which this app doesn't. window.AndroidBridge is undefined
-  // in a normal mobile browser tab, so this is a harmless no-op there — the two web APIs below are
-  // still tried too, for browsers where they do work.
-  window.AndroidBridge?.lockLandscape?.();
   return Promise.resolve()
     .then(() => document.documentElement.requestFullscreen?.())
     .then(() => screen.orientation?.lock?.('landscape'))

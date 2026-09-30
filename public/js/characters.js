@@ -290,12 +290,18 @@ async function loadTemplate() {
 // the rest of that page's life. A flaky connection dropping even one of those 15 parallel
 // requests was enough to break the viewmodel/remote figures entirely until a lucky reload. Now
 // retries the WHOLE batch up to 3 times with a short backoff before actually giving up.
+// Attempt cap raised 3 -> 6 (and reflected below in operators.js's own retry) after a live
+// report of the exact same "gun/hand invisible at match start" symptom recurring while testing
+// over a real mobile connection (the Android app) — a short, fixed retry window that's plenty
+// forgiving on a stable desktop/LAN connection can still exhaust itself on a phone's flakier,
+// slower network before the fetch ever succeeds. Backoff is unchanged (attempt*1500ms), so this
+// only extends the total window (up to ~9s longer), not how eagerly it retries.
 async function loadTemplateWithRetry(attempt = 1) {
   try {
     await loadTemplate();
   } catch (err) {
-    console.error(`character/weapon model load failed (attempt ${attempt}/3):`, err);
-    if (attempt >= 3) return;
+    console.error(`character/weapon model load failed (attempt ${attempt}/6):`, err);
+    if (attempt >= 6) return;
     await new Promise((r) => setTimeout(r, attempt * 1500));
     return loadTemplateWithRetry(attempt + 1);
   }

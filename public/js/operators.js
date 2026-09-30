@@ -110,12 +110,16 @@ async function loadOperatorOnce(id, makeSrcModel, srcClips) {
 // spawn is the first real chance for this operator's fetch to run this page session (cold), while
 // a join tends to happen later/after a retry-friendly reload — which is why it read as
 // create-specific rather than the flaky-network bug it actually is.
+// Attempt cap raised 3 -> 6 (matching the same bump in characters.js's loadTemplateWithRetry)
+// after the exact same "gun/hand invisible" symptom recurred live while testing over a real
+// mobile connection (the Android app) — a fixed 3-attempt window forgiving on desktop/LAN can
+// still exhaust itself on a phone's flakier network before a 5-60MB fetch ever succeeds.
 async function loadOperatorWithRetry(id, makeSrcModel, srcClips, attempt = 1) {
   try {
     return await loadOperatorOnce(id, makeSrcModel, srcClips);
   } catch (err) {
-    console.error(`operator "${id}" model load failed (attempt ${attempt}/3):`, err);
-    if (attempt >= 3) { loading.delete(id); throw err; }
+    console.error(`operator "${id}" model load failed (attempt ${attempt}/6):`, err);
+    if (attempt >= 6) { loading.delete(id); throw err; }
     await new Promise((r) => setTimeout(r, attempt * 1500));
     return loadOperatorWithRetry(id, makeSrcModel, srcClips, attempt + 1);
   }

@@ -23,7 +23,14 @@
     click handler at all. Not caught by this project's own headless testing because that test
     called lockHint.click() programmatically, which bypasses real hit-testing/stacking order
     entirely — a real gap in the verification method, not just the code. */
-  .screen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, #2a2620 0%, #0d0c0a 100%); z-index: 10; }
+  /* align-items:safe center (falls back to flex-start instead of clipping when content is
+     taller than the viewport) + overflow-y:auto — real bug found from a live report: on a short
+     landscape phone viewport (measured: 780x360), the auth panel's Create Account button sat
+     past the bottom edge, unreachable, with no way to scroll to it since plain `center` clips
+     overflow instead of scrolling. This is what actually needed fixing, not the app's own
+     orientation (which is forced to landscape, matching what the game — a shooter — actually
+     needs; see the Android app's AndroidManifest.xml comment). */
+  .screen { position: fixed; inset: 0; display: flex; align-items: safe center; justify-content: center; overflow-y: auto; padding: 24px 0; background: radial-gradient(ellipse at center, #2a2620 0%, #0d0c0a 100%); z-index: 10; }
   #scoreboard { z-index: 5; }
   .panel { width: 420px; max-width: 92vw; background: rgba(20,18,14,0.9); border: 1px solid #4a4232; border-radius: 8px; padding: 28px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
   .panel h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: 2px; color: #d8c98a; }
