@@ -70,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var splashVideo: TextureView
+    private lateinit var splashBackdrop: View
     private var mediaPlayer: MediaPlayer? = null
 
     private var revealed = false
@@ -83,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         webView = findViewById(R.id.webView)
         swipeRefresh = findViewById(R.id.swipeRefresh)
         splashVideo = findViewById(R.id.splashVideo)
+        splashBackdrop = findViewById(R.id.splashBackdrop)
         // Pull-to-refresh only ever makes sense on the error/offline screen (dragging down
         // mid-match to "refresh" would be a real footgun) - see the loadUrl-on-error handling
         // below, which is the only place this actually gets enabled.
@@ -199,6 +201,17 @@ class MainActivity : AppCompatActivity() {
                 override fun onAnimationEnd(animation: Animator) {
                     releaseMediaPlayer()
                     splashVideo.visibility = View.GONE
+                }
+            })
+            .start()
+        // Faded out together with the video, same duration — this is the backdrop that fills the
+        // letterbox/pillarbox gap around the (aspect-fit) video; see its own layout comment.
+        splashBackdrop.animate()
+            .alpha(0f)
+            .setDuration(300)
+            .setListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    splashBackdrop.visibility = View.GONE
                 }
             })
             .start()

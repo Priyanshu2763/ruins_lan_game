@@ -30,6 +30,17 @@
 
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
+    <!-- Sits between the WebView and the video. The FrameLayout's own background above is
+         useless for this — the WebView is match_parent too, so it fully covers it. Without this,
+         the letterbox/pillarbox gap around the (aspect-fit, non-full-bleed) video showed whatever
+         the WebView happened to be rendering underneath instead of a clean color — a live-reported
+         bug ("messy" on the sides). Faded out together with the video in MainActivity.revealGame(). -->
+    <View
+        android:id="@+id/splashBackdrop"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/splash_background" />
+
     <!-- Sized in code (MainActivity.sizeSplashVideoToAspect) to letterbox/pillarbox the full,
          un-cropped video frame within whatever space is available, centered by this gravity. -->
     <TextureView
