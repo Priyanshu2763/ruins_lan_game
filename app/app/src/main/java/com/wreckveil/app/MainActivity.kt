@@ -1,12 +1,15 @@
 package com.wreckveil.app
 
 import android.annotation.SuppressLint
+import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -53,6 +56,16 @@ class MainActivity : AppCompatActivity() {
 
         configureWebView(webView.settings)
 
+        // Debug builds only: pipes every page console.log/warn/error to `adb logcat` under the
+        // "WreckveilWeb" tag, and turns on chrome://inspect remote DevTools. Added after a live
+        // report ("login/create buttons not working" on a real phone) that turned out to be the
+        // screenOrientation bug below — but there was no way to SEE that from here at the time,
+        // only guess from source. Debuggable is checked via the ApplicationInfo flag (not
+        // BuildConfig.DEBUG, which needs buildFeatures.buildConfig turned on in Gradle) so this
+        // needs zero build-config changes and can never accidentally ship enabled in a release build.
+        val isDebuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (isDebuggable) WebView.setWebContentsDebuggingEnabled(true)
+
         webView.webViewClient = object : WebViewClient() {
             // Keep normal navigation (and the auth/dashboard flow, which is all same-origin)
             // inside the WebView; only hand off truly external links (if any ever appear) to a
@@ -75,7 +88,17 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
+                val level = when (msg.messageLevel()) {
+                    ConsoleMessage.MessageLevel.ERROR -> Log.ERROR
+                    ConsoleMessage.MessageLevel.WARNING -> Log.WARN
+                    else -> Log.DEBUG
+                }
+                Log.println(level, "WreckveilWeb", "${msg.message()} (${msg.sourceId()}:${msg.lineNumber()})")
+                return true
+            }
+        }
 
         webView.loadUrl(GAME_URL)
     }

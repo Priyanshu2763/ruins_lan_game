@@ -10,7 +10,18 @@ installable app icon and a full-screen container to run inside on a phone/tablet
 - `MainActivity` — a full-screen `WebView` pointed at `https://game.antiszn.com` (see
   `MainActivity.GAME_URL`). Handles JS/localStorage, keeps in-game navigation inside the app,
   hides the system status/nav bars, and shows a pull-to-refresh retry screen if the game can't
-  be reached.
+  be reached. Orientation is left `unspecified` (free rotation, matching a normal app) rather
+  than locked — the web client already locks to landscape itself once a match actually starts
+  (see `public/js/touchControls.js`); an earlier version of this app force-locked landscape at
+  the Activity level instead, which cramped the login form off the bottom of the screen on a
+  real phone (a live-reported bug: fixed by removing that lock, not by touching the web CSS).
+
+## Debugging a real device
+
+Debug builds pipe every WebView `console.log`/`warn`/`error` to `adb logcat` under the tag
+`WreckveilWeb` (`adb logcat -s WreckveilWeb`), and enable `chrome://inspect` remote DevTools
+from a desktop Chrome over a USB/adb connection — both gated on the app being debuggable, so
+neither is present in a release build.
 
 ## Building
 
