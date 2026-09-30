@@ -42,11 +42,29 @@
         android:background="@color/splash_background" />
 
     <!-- Sized in code (MainActivity.sizeSplashVideoToAspect) to letterbox/pillarbox the full,
-         un-cropped video frame within whatever space is available, centered by this gravity. -->
+         un-cropped video frame within whatever space is available, centered by this gravity.
+         Starts at alpha 0 — MainActivity fades it in once the banner phase below hands off to it,
+         rather than snapping straight to visible. -->
     <TextureView
         android:id="@+id/splashVideo"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_gravity="center" />
+        android:layout_gravity="center"
+        android:alpha="0" />
+
+    <!-- First splash beat: a static banner (res/drawable/splash_banner.jpg, used as supplied, no
+         crop — fitCenter shows the whole frame the same way the video's own letterbox logic does)
+         that fades in, holds, then fades out before the video takes over — see MainActivity's
+         runBannerThenVideo(). scaleType=fitCenter is what "as is, don't crop" actually needs here;
+         the video needs its own manual aspect math instead only because TextureView has no
+         equivalent built-in scale mode. On top of everything (highest in this FrameLayout), shown
+         first, so it's what the user actually sees at cold start. -->
+    <ImageView
+        android:id="@+id/splashBanner"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter"
+        android:src="@drawable/splash_banner"
+        android:alpha="0" />
 
 </FrameLayout>

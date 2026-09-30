@@ -9,8 +9,6 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
@@ -24,6 +22,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.ImageView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 
@@ -63,6 +62,19 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
  * bug for a worse one; that's now fixed properly at the source instead (public/index.html's
  * `.screen` CSS scrolls instead of clipping when content is taller than the viewport), so the app
  * can stay landscape-locked throughout.
+ *
+ * Cold start is actually TWO splash beats in sequence, not one: a static banner
+ * (res/drawable/splash_banner.jpg, a real image the user supplied) fades in, holds, and fades out
+ * (runBannerThenVideo, ~2.5s total) BEFORE the video's own MediaPlayer/decode is even set up —
+ * only once the banner is fully faded out does setUpSplashVideo() run. This is deliberately not
+ * just decoration: a plain static image costs essentially nothing in GPU/decode terms compared to
+ * video playback, so this ~2.5s banner phase gives the WebView's heaviest startup work (firing its
+ * ~15 parallel asset requests for the character/gun 3D models) a real head start before the video
+ * ALSO starts competing for the same device's GPU/decode budget — a much stronger version of the
+ * resource-contention mitigation an earlier, smaller (500ms) fixed delay attempted for a live
+ * "gun/hands invisible, app-only" report. The video itself now fades in (not a hard cut) once the
+ * banner hands off to it, for a continuous "lights up, holds, lights down, next beat lights up"
+ * feel end to end, matching what was actually asked for.
  */
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -73,6 +85,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var splashVideo: TextureView
     private lateinit var splashBackdrop: View
+    private lateinit var splashBanner: ImageView
     private var mediaPlayer: MediaPlayer? = null
 
     private var revealed = false
@@ -87,6 +100,7 @@ class MainActivity : AppCompatActivity() {
         swipeRefresh = findViewById(R.id.swipeRefresh)
         splashVideo = findViewById(R.id.splashVideo)
         splashBackdrop = findViewById(R.id.splashBackdrop)
+        splashBanner = findViewById(R.id.splashBanner)
         // Pull-to-refresh only ever makes sense on the error/offline screen (dragging down
         // mid-match to "refresh" would be a real footgun) - see the loadUrl-on-error handling
         // below, which is the only place this actually gets enabled.
@@ -141,19 +155,30 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.loadUrl(GAME_URL)
-        // Delayed, not immediate — a live report ("gun/hands invisible, app-only, works fine in a
-        // phone/PC browser") led to a resource-contention hypothesis: this app's game/gun 3D models
-        // start fetching+decoding the INSTANT the page's JS parses (characters.js fires that load at
-        // module-eval time, before login even), and the splash video's own decode used to start at
-        // the exact same instant — both racing for the same device's GPU/decode resource budget
-        // right at startup, something a plain browser tab showing this page never has to contend
-        // with (no video decode running alongside it there). MediaPlayer.prepareAsync() was already
-        // non-blocking (it never held up the WebView's own thread), so this isn't a threading fix —
-        // it's giving the WebView's heaviest kickoff work (firing ~15 asset requests) a head start
-        // before the video ALSO starts consuming GPU/decode resources, shrinking the overlap instead
-        // of the two starting in a dead heat. Not confirmed against a real device/log — flagged
-        // plainly as a hypothesis-driven mitigation to actually test, not a guaranteed fix.
-        Handler(Looper.getMainLooper()).postDelayed({ setUpSplashVideo() }, 500)
+        runBannerThenVideo()
+    }
+
+    // Beat 1 of the cold-start sequence: fade the static banner in, hold, fade it out, THEN (only
+    // once it's fully gone) hand off to the video. "Lights turning on slowly and off slowly" per
+    // the ask — ease-in/ease-out alpha, not a linear fade, reads closer to a real light dimming
+    // than a flat ramp. ~2.5s total (700+1100+700ms), matching the requested 2-3s.
+    private fun runBannerThenVideo() {
+        splashBanner.animate()
+            .alpha(1f)
+            .setDuration(700)
+            .withEndAction {
+                splashBanner.postDelayed({
+                    splashBanner.animate()
+                        .alpha(0f)
+                        .setDuration(700)
+                        .withEndAction {
+                            splashBanner.visibility = View.GONE
+                            setUpSplashVideo()
+                        }
+                        .start()
+                }, 1100)
+            }
+            .start()
     }
 
     private fun setUpSplashVideo() {
@@ -169,6 +194,9 @@ class MainActivity : AppCompatActivity() {
                     mp.setOnPreparedListener {
                         sizeSplashVideoToAspect(mp.videoWidth, mp.videoHeight, availW, availH)
                         mp.start()
+                        // Fades in rather than snapping to visible — a continuous "lights up" feel
+                        // picking up right where the banner's own fade-out left off, not a hard cut.
+                        splashVideo.animate().alpha(1f).setDuration(300).start()
                     }
                     mp.setOnCompletionListener { revealGame() }
                     mp.setOnErrorListener { _, _, _ -> revealGame(); true }
