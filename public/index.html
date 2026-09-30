@@ -434,6 +434,9 @@
        clearance, never loses it, but this is still a first pass worth a real-device glance. */
     #minimap { top: 6px; left: 6px; width: 80px; height: 80px; }
     #tcChatBtn { top: 92px; left: 6px; width: 36px; height: 36px; }
+    /* Moved off dead-center (where it sat directly on top of #matchTimer, per a live report) to
+       beside the minimap instead — same top as the map, just to its right. */
+    #tcStatsBtn { top: 6px; left: 92px; width: 36px; height: 36px; transform: none; }
     #roomTag { display: none; } /* not critical during play; the dashboard already shows room info, and this column has no room to spare */
     #chatLog { top: 132px; left: 6px; bottom: auto; width: 190px; max-height: 55px; }
     #chatInput { top: 132px; left: 6px; bottom: auto; width: 190px; }
