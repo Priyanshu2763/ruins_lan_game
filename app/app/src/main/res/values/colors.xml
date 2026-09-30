@@ -2,4 +2,9 @@
     <!-- Rough match to the web client's own dark/gold palette (see index.html's panel styling) -
          the app window/icon background and the letterbox color around the splash video. -->
     <color name="splash_background">#14120E</color>
+    <!-- Same gold (#e8c65a) already used everywhere in the web client's own HUD/buttons — used
+         here for the BGMI-style loading progress bar/text and the offline dialog's retry button,
+         so both read as "this game's" style, not a generic Android default. -->
+    <color name="splash_gold">#E8C65A</color>
+    <color name="splash_gold_dim">#B8AE94</color>
 </resources>

@@ -16,79 +16,97 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
 import android.widget.ImageView
+import android.widget.ProgressBar
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 
 /**
- * The whole app, today: a full-screen WebView pointed at the live game, with a splash video
- * playing on top of it while the page loads underneath. No native game logic lives here on
- * purpose — this is deliberately just an outer container ("a container for the website running
- * inside"), so every gameplay/UI change already made to the actual web client (public/js,
- * index.html) shows up here automatically with zero app updates needed.
+ * The whole app, today: a full-screen WebView pointed at the live game, wrapped in a cold-start
+ * sequence, then otherwise no native game logic — deliberately just an outer container ("a
+ * container for the website running inside"), so every gameplay/UI change already made to the
+ * actual web client (public/js, index.html) shows up here automatically with zero app updates.
  *
  * GAME_URL is the same public game.antiszn.com domain the desktop browser uses (see the repo's
  * own CLAUDE.md / memory for the Apache reverse-proxy setup this points through) — not
  * localhost, since this needs to work on a real device, not just this dev machine.
  *
- * There used to be a separate SplashActivity that showed a placeholder for a fixed 1.2s delay
- * BEFORE MainActivity (and its WebView) were even created — meaning the game never started
- * loading until after the splash was already done. Merged into one Activity so the WebView starts
- * loading immediately, in parallel with the splash video baked into res/raw/splash.mp4 (a real
- * clip the user supplied, sped up 1.5x — see the app's own scratchpad notes / commit message for
- * the ffmpeg command — kept at its full original frame, not cropped: sizeSplashVideoToAspect below
- * letterboxes/pillarboxes to show the whole frame instead of stretching or cropping it). The video
- * plays exactly once, then fades out — an earlier version waited for the page to finish loading
- * too and looped the video if it hadn't, which read as a stuck/broken splash on a live device
- * rather than "play then disappear smoothly" as asked.
+ * Cold-start sequence, strictly ordered end to end (see runStartupSequence/each stage's own
+ * function below — every stage only starts once the previous one has actually finished, chained
+ * via callbacks, never on independent timers that could drift out of sync):
+ *   1. webView.loadUrl(GAME_URL) fires FIRST and unconditionally, before any splash UI — the page
+ *      starts loading in the background for the ENTIRE sequence below, not just part of it.
+ *   2. splashVideo (res/raw/splash.mp4, a real clip the user supplied, sped up 1.5x, kept at its
+ *      full frame via sizeSplashVideoToAspect — no crop/stretch): fades in, plays once, fades out.
+ *   3. loadingScreen: the banner image (res/drawable/splash_banner.jpg, used as supplied) doubles
+ *      as a real BGMI-style loading screen — fades in, then STAYS UP until the web side reports
+ *      real load completion (window.AndroidBridge.onLoadProgress, called from
+ *      public/js/characters.js's reportLoadProgress as its ~15 core asset requests resolve) or a
+ *      safety timeout elapses, then fades out. This is a deliberate architecture change from an
+ *      earlier version, which revealed the game after a fixed timer regardless of whether loading
+ *      had actually finished — exactly the class of bug behind a live "gun/hands invisible"
+ *      report on a slow connection. Tying the reveal to a REAL signal instead of a guessed
+ *      duration fixes that at the root rather than extending the guess further.
+ *   4. splashBackdrop fades out, revealing the (now loaded) game underneath.
  *
- * The video is driven through a TextureView + MediaPlayer directly, not the android.widget.
- * VideoView an earlier version used — VideoView wraps a SurfaceView internally, a genuinely
- * separate compositor surface that (without an explicit setZOrderOnTop call VideoView doesn't
- * expose) defaults to sitting BEHIND the window's own content. Layered over the WebView (itself
- * hardware-accelerated), that meant the video's audio played fine — a separate pipeline,
- * unaffected — while the picture itself was invisible: a live-reported bug ("sound comes, no
- * visual"). TextureView is a normal View subclass that composites through the regular view
- * hierarchy, so it just works on top with no special handling needed.
+ * offlineOverlay is independent of all of the above: shown/hidden purely by the WebView's own
+ * onReceivedError/successful-load signals, so it can interrupt the sequence at any point (or
+ * appear later, if the connection drops mid-match) and doesn't need to know or care which of the
+ * four stages above is currently active.
+ *
+ * The video is driven through a TextureView + MediaPlayer directly, not android.widget.VideoView
+ * — VideoView wraps a SurfaceView internally, a genuinely separate compositor surface that
+ * (without an explicit setZOrderOnTop call VideoView doesn't expose) defaults to sitting BEHIND
+ * the window's own content; layered over the WebView (itself hardware-accelerated), that meant
+ * the video's audio played fine (a separate pipeline, unaffected) while the picture itself was
+ * invisible — a live-reported bug ("sound comes, no visual"). TextureView is a normal View
+ * subclass that composites through the regular view hierarchy, so it just works on top with no
+ * special handling needed.
  *
  * screenOrientation is locked to "userLandscape" in the manifest (this is a landscape shooter) —
  * an earlier attempt unlocked it to fix a real "login buttons unreachable" bug, which traded one
  * bug for a worse one; that's now fixed properly at the source instead (public/index.html's
  * `.screen` CSS scrolls instead of clipping when content is taller than the viewport), so the app
  * can stay landscape-locked throughout.
- *
- * Cold start is actually TWO splash beats in sequence, not one: a static banner
- * (res/drawable/splash_banner.jpg, a real image the user supplied) fades in, holds, and fades out
- * (runBannerThenVideo, ~2.5s total) BEFORE the video's own MediaPlayer/decode is even set up —
- * only once the banner is fully faded out does setUpSplashVideo() run. This is deliberately not
- * just decoration: a plain static image costs essentially nothing in GPU/decode terms compared to
- * video playback, so this ~2.5s banner phase gives the WebView's heaviest startup work (firing its
- * ~15 parallel asset requests for the character/gun 3D models) a real head start before the video
- * ALSO starts competing for the same device's GPU/decode budget — a much stronger version of the
- * resource-contention mitigation an earlier, smaller (500ms) fixed delay attempted for a live
- * "gun/hands invisible, app-only" report. The video itself now fades in (not a hard cut) once the
- * banner hands off to it, for a continuous "lights up, holds, lights down, next beat lights up"
- * feel end to end, matching what was actually asked for.
  */
 class MainActivity : AppCompatActivity() {
     companion object {
         const val GAME_URL = "https://game.antiszn.com"
+        const val LOADING_SCREEN_TIMEOUT_MS = 20000L // never leave the player stuck if progress genuinely stalls
     }
 
     private lateinit var webView: WebView
-    private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var splashVideo: TextureView
     private lateinit var splashBackdrop: View
-    private lateinit var splashBanner: ImageView
+    private lateinit var loadingScreen: View
+    private lateinit var loadingProgressBar: ProgressBar
+    private lateinit var loadingProgressText: TextView
+    private lateinit var offlineOverlay: View
+    private lateinit var offlineRetryBtn: Button
     private var mediaPlayer: MediaPlayer? = null
 
     private var revealed = false
+    private var loadingScreenDone = false
+    private val loadingTimeoutRunnable = Runnable { finishLoadingScreen() }
+
+    // Exposed to the page as `window.AndroidBridge` — lets the web client (characters.js's
+    // reportLoadProgress) push real load-progress numbers to this native loading screen instead
+    // of the app guessing with a fixed timer. Narrow on purpose (one method, an int) since
+    // anything exposed here is callable by whatever content the WebView happens to be showing.
+    private inner class WebAppInterface {
+        @JavascriptInterface
+        fun onLoadProgress(pct: Int) {
+            runOnUiThread { updateLoadingProgress(pct) }
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -97,16 +115,15 @@ class MainActivity : AppCompatActivity() {
         hideSystemBars()
 
         webView = findViewById(R.id.webView)
-        swipeRefresh = findViewById(R.id.swipeRefresh)
         splashVideo = findViewById(R.id.splashVideo)
         splashBackdrop = findViewById(R.id.splashBackdrop)
-        splashBanner = findViewById(R.id.splashBanner)
-        // Pull-to-refresh only ever makes sense on the error/offline screen (dragging down
-        // mid-match to "refresh" would be a real footgun) - see the loadUrl-on-error handling
-        // below, which is the only place this actually gets enabled.
-        swipeRefresh.isEnabled = false
-        swipeRefresh.setOnRefreshListener {
-            swipeRefresh.isRefreshing = false
+        loadingScreen = findViewById(R.id.loadingScreen)
+        loadingProgressBar = findViewById(R.id.loadingProgressBar)
+        loadingProgressText = findViewById(R.id.loadingProgressText)
+        offlineOverlay = findViewById(R.id.offlineOverlay)
+        offlineRetryBtn = findViewById(R.id.offlineRetryBtn)
+        offlineRetryBtn.setOnClickListener {
+            offlineOverlay.visibility = View.GONE
             webView.loadUrl(GAME_URL)
         }
 
@@ -119,6 +136,12 @@ class MainActivity : AppCompatActivity() {
         // and can never accidentally ship enabled in a release build.
         val isDebuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         if (isDebuggable) WebView.setWebContentsDebuggingEnabled(true)
+
+        // Registered before loadUrl, per Android's own guidance for addJavascriptInterface — the
+        // actual reportLoadProgress calls only start firing well after this (once characters.js's
+        // module code runs and its fetches start resolving), so exact ordering here isn't load-
+        // bearing in practice, but this is the documented-correct order regardless.
+        webView.addJavascriptInterface(WebAppInterface(), "AndroidBridge")
 
         webView.webViewClient = object : WebViewClient() {
             // Keep normal navigation (and the auth/dashboard flow, which is all same-origin)
@@ -134,11 +157,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            // Replaces an earlier bare "load about:blank + enable pull-to-refresh" fallback with a
+            // real themed dialog (offlineOverlay) + an explicit RETRY button, per the explicit ask
+            // — one clear recovery path instead of a silent gesture the player might not discover.
+            // Sits on top of the whole splash sequence regardless of which stage is currently
+            // active (it's the topmost element in activity_main.xml) and doesn't need to pause or
+            // cancel whatever's still running underneath — it's fully opaque, so that's harmless.
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 super.onReceivedError(view, request, error)
                 if (request.isForMainFrame) {
-                    webView.loadUrl("about:blank")
-                    swipeRefresh.isEnabled = true
+                    offlineOverlay.visibility = View.VISIBLE
                 }
             }
         }
@@ -155,43 +183,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.loadUrl(GAME_URL)
-        runBannerThenVideo()
-    }
-
-    // Beat 1 of the cold-start sequence: fade the static banner in, hold, fade it out, THEN (only
-    // once it's fully gone) hand off to the video. "Lights turning on slowly and off slowly" per
-    // the ask — ease-in/ease-out alpha, not a linear fade, reads closer to a real light dimming
-    // than a flat ramp. ~2.5s total (700+1100+700ms), matching the requested 2-3s.
-    private fun runBannerThenVideo() {
-        splashBanner.animate()
-            .alpha(1f)
-            .setDuration(700)
-            .withEndAction {
-                splashBanner.postDelayed({
-                    splashBanner.animate()
-                        .alpha(0f)
-                        .setDuration(700)
-                        .withEndAction {
-                            splashBanner.visibility = View.GONE
-                            setUpSplashVideo()
-                        }
-                        .start()
-                }, 1100)
-            }
-            .start()
+        setUpSplashVideo()
     }
 
     // TextureView creates its SurfaceTexture as soon as it's attached+laid out, independent of
     // whether a listener is set — and onSurfaceTextureAvailable fires exactly ONCE, at that
-    // creation moment. Real bug found from a live report ("banner plays, then stuck on black, no
-    // video"): this used to unconditionally wait for that callback, which was fine when
-    // setUpSplashVideo() ran immediately in onCreate (the surface hadn't been created yet, so the
-    // listener was in place in time) — but now it's only called ~2.5s later, after the banner
-    // sequence, by which point the surface was already created with no listener attached to catch
-    // it. That one-time event was gone forever, so the callback never fired again and the
-    // MediaPlayer was never even created. Fixed by checking isAvailable first and using the
-    // already-existing SurfaceTexture directly in that (now-common) case, falling back to the
-    // listener only for the genuine edge case where the surface truly isn't ready yet.
+    // creation moment. Checking isAvailable first (using the already-existing SurfaceTexture
+    // directly when it's there) rather than unconditionally waiting on the listener avoids a real
+    // bug class this hit once already: if this function's caller is ever delayed relative to
+    // onCreate for any reason, the surface may already exist by the time this runs, and a listener
+    // attached after the fact would silently never fire.
     private fun setUpSplashVideo() {
         if (splashVideo.isAvailable) {
             startVideoPlayback(splashVideo.surfaceTexture!!, splashVideo.width, splashVideo.height)
@@ -218,16 +219,18 @@ class MainActivity : AppCompatActivity() {
             mp.setOnPreparedListener {
                 sizeSplashVideoToAspect(mp.videoWidth, mp.videoHeight, availW, availH)
                 mp.start()
-                // Fades in rather than snapping to visible — a continuous "lights up" feel picking
-                // up right where the banner's own fade-out left off, not a hard cut.
                 splashVideo.animate().alpha(1f).setDuration(300).start()
             }
-            mp.setOnCompletionListener { revealGame() }
-            mp.setOnErrorListener { _, _, _ -> revealGame(); true }
+            // Video fully fades out before the loading screen appears — a hard cut between them
+            // would undercut the "lights down, next beat lights up" feel that was specifically
+            // asked for; onError takes the same path (skip straight to the loading screen) rather
+            // than leaving the player stuck on a broken video with nothing else ever happening.
+            mp.setOnCompletionListener { fadeOutVideoThenShowLoadingScreen() }
+            mp.setOnErrorListener { _, _, _ -> fadeOutVideoThenShowLoadingScreen(); true }
             mp.prepareAsync()
         } catch (e: Exception) {
-            Log.e("WreckveilSplash", "splash video setup failed, revealing game directly", e)
-            revealGame()
+            Log.e("WreckveilSplash", "splash video setup failed, skipping to loading screen", e)
+            fadeOutVideoThenShowLoadingScreen()
         }
     }
 
@@ -250,11 +253,7 @@ class MainActivity : AppCompatActivity() {
         splashVideo.layoutParams = params
     }
 
-    // Plays exactly once, then fades out to reveal the game loading underneath (which started
-    // loading back in onCreate, in parallel with the video).
-    private fun revealGame() {
-        if (revealed) return
-        revealed = true
+    private fun fadeOutVideoThenShowLoadingScreen() {
         splashVideo.animate()
             .alpha(0f)
             .setDuration(300)
@@ -262,11 +261,58 @@ class MainActivity : AppCompatActivity() {
                 override fun onAnimationEnd(animation: Animator) {
                     releaseMediaPlayer()
                     splashVideo.visibility = View.GONE
+                    showLoadingScreen()
                 }
             })
             .start()
-        // Faded out together with the video, same duration — this is the backdrop that fills the
-        // letterbox/pillarbox gap around the (aspect-fit) video; see its own layout comment.
+    }
+
+    // Beat 2: the banner-as-loading-screen fades in ("lights turning on slowly"), then stays up
+    // until updateLoadingProgress sees 100% (real completion OR characters.js giving up after its
+    // own retries, which also reports 100 — see that file's own comment) or the safety timeout
+    // below fires — whichever happens first. Not a fixed duration like the old banner-only beat
+    // was; this is the whole point of the change, tying the reveal to a real signal.
+    private fun showLoadingScreen() {
+        loadingScreenDone = false
+        loadingProgressBar.progress = 0
+        loadingProgressText.text = getString(R.string.loading_prefix)
+        loadingScreen.visibility = View.VISIBLE
+        loadingScreen.animate().alpha(1f).setDuration(700).start()
+        loadingScreen.postDelayed(loadingTimeoutRunnable, LOADING_SCREEN_TIMEOUT_MS)
+    }
+
+    private fun updateLoadingProgress(pct: Int) {
+        val clamped = pct.coerceIn(0, 100)
+        loadingProgressBar.progress = clamped
+        loadingProgressText.text = "${getString(R.string.loading_prefix)} $clamped%"
+        if (clamped >= 100) finishLoadingScreen()
+    }
+
+    // "Lights turning off slowly" — the other half of the fade the banner phase was asked for,
+    // now triggered by real completion instead of a timer. Idempotent (guards against both the
+    // 100%-progress path and the safety timeout firing close together).
+    private fun finishLoadingScreen() {
+        if (loadingScreenDone) return
+        loadingScreenDone = true
+        loadingScreen.removeCallbacks(loadingTimeoutRunnable)
+        loadingScreen.animate()
+            .alpha(0f)
+            .setDuration(700)
+            .setListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    loadingScreen.visibility = View.GONE
+                    revealGame()
+                }
+            })
+            .start()
+    }
+
+    // Final stage: the backdrop (which was only ever there to fill the letterbox gap behind the
+    // video/loading-screen — see its own layout comment) fades out, revealing the by-now-loaded
+    // game underneath.
+    private fun revealGame() {
+        if (revealed) return
+        revealed = true
         splashBackdrop.animate()
             .alpha(0f)
             .setDuration(300)

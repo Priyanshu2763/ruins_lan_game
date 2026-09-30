@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">WRECKVEIL</string>
+    <string name="offline_title">Connection Lost</string>
+    <string name="offline_subtitle">Check your internet connection and try again.</string>
+    <string name="offline_retry">RETRY</string>
+    <string name="loading_prefix">LOADING…</string>
 </resources>

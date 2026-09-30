@@ -40,14 +40,34 @@ app.use(compression({
   },
 }));
 app.use(express.json());
+// Real gap found from a live report ("app is slow to load every time, even on repeat opens"):
+// express.static() with no options sends NO Cache-Control header at all, so every request for
+// even the largest model files (some 60MB+) was a full round trip every single time, cold OR
+// warm — the WebView's own cache mode was already correct (LOAD_DEFAULT), it simply had nothing
+// to work with. These three paths are big, rarely-changed binary assets (3D models/textures,
+// meme posters, sound clips) — mounted BEFORE the generic static() below so they're served with
+// a real Cache-Control instead of falling through to it. One day, not longer: this project
+// redeploys the SAME filename with new content often enough (a re-processed image, a swapped
+// model) that a longer window risks a real user seeing stale content for longer than that's
+// worth — one day is enough to make same-day repeat opens (the actual common case) fast, while
+// still recovering automatically the next day if something at that path changed.
+const oneDayMs = 24 * 60 * 60 * 1000;
+const assetCacheOpts = { maxAge: oneDayMs };
+app.use('/models', express.static(path.join(__dirname, '..', 'public', 'models'), assetCacheOpts));
+app.use('/images', express.static(path.join(__dirname, '..', 'public', 'images'), assetCacheOpts));
+app.use('/sounds', express.static(path.join(__dirname, '..', 'public', 'sounds'), assetCacheOpts));
 app.use(express.static(path.join(__dirname, '..', 'public')));
-app.use('/vendor/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build')));
+// Library code straight from node_modules — genuinely immutable in practice (only changes if the
+// three.js dependency itself is deliberately upgraded, which isn't a "redeploy the same filename
+// with new content" situation the way game assets are), so a much longer cache is safe here.
+const oneMonthMs = 30 * oneDayMs;
+app.use('/vendor/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build'), { maxAge: oneMonthMs }));
 // GLTFLoader/FBXLoader/SkeletonUtils etc. — not part of the core 'three' package export, but
 // shipped inside the same npm package under examples/jsm. Served as its own tree (not copied
 // into public/) so its many internal relative imports (loaders -> ../libs/fflate.module.js,
 // ../curves/NURBSCurve.js, etc.) keep resolving correctly; their own `from 'three'` imports
 // resolve via the page's existing import map regardless of which path loaded them.
-app.use('/vendor/three-examples', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'examples', 'jsm')));
+app.use('/vendor/three-examples', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'examples', 'jsm'), { maxAge: oneMonthMs }));
 app.use('/shared', express.static(path.join(__dirname, '..', 'shared')));
 
 // ---------- Auth + profile/customization: Postgres-backed (see server/db.js, server/db/schema.sql) ----------

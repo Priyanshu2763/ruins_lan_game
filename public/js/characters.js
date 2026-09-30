@@ -234,6 +234,15 @@ function onceReady(fn) {
   else readyCallbacks.push(fn);
 }
 
+// Reports how much of the ALWAYS-needed base template has loaded to the Android app's native
+// splash/loading screen (window.AndroidBridge, MainActivity.kt) — a harmless no-op in a normal
+// browser tab, where window.AndroidBridge is simply undefined. Not used for anything on the web
+// side itself; this is purely an outbound signal for the app's own BGMI-style progress bar, which
+// otherwise has no way to know how far along this fetch actually is.
+function reportLoadProgress(pct) {
+  try { window.AndroidBridge?.onLoadProgress?.(Math.round(pct)); } catch { /* never let a reporting hiccup break the actual load */ }
+}
+
 async function loadTemplate() {
   const gunIds = Object.keys(GUN_URLS).map(Number);
   const texLoader = new THREE.TextureLoader();
@@ -241,14 +250,21 @@ async function loadTemplate() {
     t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4;
     return t;
   });
+  // total = the exact same 15 items (2 char glTFs + 1 anim + 2 skins + 4 guns + 6 hair) the
+  // Promise.all below has always fetched — tracked here purely for progress reporting, doesn't
+  // change what's fetched or in what order, and reuses the array's own natural resolve timing
+  // rather than polling/estimating.
+  const total = 5 + gunIds.length + HAIR_FILES.length;
+  let done = 0;
+  const track = (p) => p.then((v) => { done++; reportLoadProgress((done / total) * 100); return v; });
   const [maleGltf, femaleGltf, animGltf, maleSkin, femaleSkin, ...rest] = await Promise.all([
-    gltfLoader.loadAsync(CHARACTER_URLS.male),
-    gltfLoader.loadAsync(CHARACTER_URLS.female),
-    gltfLoader.loadAsync(ANIMATIONS_URL),
-    loadSkin(SKIN_TEXTURE_URLS.male),
-    loadSkin(SKIN_TEXTURE_URLS.female),
-    ...gunIds.map((id) => fbxLoader.loadAsync(GUN_URLS[id])),
-    ...HAIR_FILES.map((f) => gltfLoader.loadAsync(`/models/character/hair/${f}.gltf`)),
+    track(gltfLoader.loadAsync(CHARACTER_URLS.male)),
+    track(gltfLoader.loadAsync(CHARACTER_URLS.female)),
+    track(gltfLoader.loadAsync(ANIMATIONS_URL)),
+    track(loadSkin(SKIN_TEXTURE_URLS.male)),
+    track(loadSkin(SKIN_TEXTURE_URLS.female)),
+    ...gunIds.map((id) => track(fbxLoader.loadAsync(GUN_URLS[id]))),
+    ...HAIR_FILES.map((f) => track(gltfLoader.loadAsync(`/models/character/hair/${f}.gltf`))),
   ]);
   // Real regression, found from a live report: preloadSights() used to be IN the Promise.all
   // above, coupling the whole character/gun template to two extra FBX loads that have nothing to
@@ -301,7 +317,14 @@ async function loadTemplateWithRetry(attempt = 1) {
     await loadTemplate();
   } catch (err) {
     console.error(`character/weapon model load failed (attempt ${attempt}/6):`, err);
-    if (attempt >= 6) return;
+    if (attempt >= 6) {
+      // Also reported as "100%" (not a real completion, but a "stop waiting" signal) — the app's
+      // native loading screen has no other way to know this ultimately failed rather than merely
+      // being slow, and would otherwise sit on a percentage that stalled partway forever (until
+      // its own separate safety timeout, if any, eventually kicked in anyway).
+      reportLoadProgress(100);
+      return;
+    }
     await new Promise((r) => setTimeout(r, attempt * 1500));
     return loadTemplateWithRetry(attempt + 1);
   }

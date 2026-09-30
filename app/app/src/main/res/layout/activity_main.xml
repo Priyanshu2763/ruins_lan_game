@@ -1,40 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The WebView (game) starts loading immediately, underneath a splash video overlay played on
-     top of it — see MainActivity for the "play once, then fade out" reveal logic. FrameLayout so
-     the video simply sits on top, no separate splash Activity/transition needed.
-
-     The video is a TextureView (MainActivity drives a MediaPlayer into it directly), not the
-     android.widget.VideoView used in an earlier version — VideoView wraps a SurfaceView
-     internally, which is a genuinely separate compositor surface that (without an explicit
-     setZOrderOnTop call VideoView doesn't expose) defaults to sitting BEHIND the window's own
-     content. With a WebView underneath (itself hardware-accelerated), that meant the video's
-     audio played fine (a separate pipeline, unaffected) while the picture itself was invisible —
-     a live-reported bug ("sound comes, no visual"). TextureView is a normal View subclass that
-     composites through the regular view hierarchy, so it just works on top with no special
-     handling needed. -->
+<!-- Cold-start sequence, in strict order (see MainActivity for the actual state machine):
+       1. WebView starts loading GAME_URL immediately, in the background, for the whole sequence.
+       2. splashVideo: fades in, plays once, fades out.
+       3. loadingScreen (splashBanner + a BGMI-style progress bar/%): fades in, stays up until the
+          web side reports real load completion (or a safety timeout), fades out.
+       4. splashBackdrop fades out, revealing the (by now loaded) game underneath.
+     offlineOverlay sits on top of all of it, shown/hidden independently whenever the WebView
+     itself reports a load failure — can interrupt any of the above at any point. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/splash_background">
 
-    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-        android:id="@+id/swipeRefresh"
+    <WebView
+        android:id="@+id/webView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="match_parent"
+        android:background="@color/splash_background" />
 
-        <WebView
-            android:id="@+id/webView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:background="@color/splash_background" />
-
-    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
-
-    <!-- Sits between the WebView and the video. The FrameLayout's own background above is
-         useless for this — the WebView is match_parent too, so it fully covers it. Without this,
-         the letterbox/pillarbox gap around the (aspect-fit, non-full-bleed) video showed whatever
+    <!-- Sits between the WebView and the video/loading-screen. The FrameLayout's own background
+         above is useless for this — the WebView is match_parent too, so it fully covers it.
+         Without this, the letterbox/pillarbox gap around the (aspect-fit) video showed whatever
          the WebView happened to be rendering underneath instead of a clean color — a live-reported
-         bug ("messy" on the sides). Faded out together with the video in MainActivity.revealGame(). -->
+         bug ("messy" on the sides). Faded out last, once the whole splash sequence is done. -->
     <View
         android:id="@+id/splashBackdrop"
         android:layout_width="match_parent"
@@ -43,8 +31,7 @@
 
     <!-- Sized in code (MainActivity.sizeSplashVideoToAspect) to letterbox/pillarbox the full,
          un-cropped video frame within whatever space is available, centered by this gravity.
-         Starts at alpha 0 — MainActivity fades it in once the banner phase below hands off to it,
-         rather than snapping straight to visible. -->
+         Starts at alpha 0 — MainActivity fades it in once it starts playing. -->
     <TextureView
         android:id="@+id/splashVideo"
         android:layout_width="match_parent"
@@ -52,19 +39,96 @@
         android:layout_gravity="center"
         android:alpha="0" />
 
-    <!-- First splash beat: a static banner (res/drawable/splash_banner.jpg, used as supplied, no
-         crop — fitCenter shows the whole frame the same way the video's own letterbox logic does)
-         that fades in, holds, then fades out before the video takes over — see MainActivity's
-         runBannerThenVideo(). scaleType=fitCenter is what "as is, don't crop" actually needs here;
-         the video needs its own manual aspect math instead only because TextureView has no
-         equivalent built-in scale mode. On top of everything (highest in this FrameLayout), shown
-         first, so it's what the user actually sees at cold start. -->
-    <ImageView
-        android:id="@+id/splashBanner"
+    <!-- Beat 2: the banner (res/drawable/splash_banner.jpg, used as supplied, no crop —
+         fitCenter shows the whole frame) doubles as a real loading screen, not just decoration —
+         a BGMI-style thin gold progress bar + percentage near the bottom, driven by real load
+         progress reported from the web side (shared/... -> characters.js's reportLoadProgress ->
+         window.AndroidBridge, see MainActivity's WebAppInterface). Grouped in one container so
+         fading the whole loading screen in/out is a single animation, not three kept in sync by
+         hand. Starts alpha 0 + GONE; MainActivity controls both. -->
+    <FrameLayout
+        android:id="@+id/loadingScreen"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:scaleType="fitCenter"
-        android:src="@drawable/splash_banner"
-        android:alpha="0" />
+        android:alpha="0"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/splashBanner"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="fitCenter"
+            android:src="@drawable/splash_banner" />
+
+        <ProgressBar
+            android:id="@+id/loadingProgressBar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="5dp"
+            android:layout_gravity="bottom"
+            android:layout_marginHorizontal="48dp"
+            android:layout_marginBottom="40dp"
+            android:max="100"
+            android:progress="0"
+            android:progressTint="@color/splash_gold"
+            android:progressBackgroundTint="#332E22" />
+
+        <TextView
+            android:id="@+id/loadingProgressText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:layout_marginBottom="52dp"
+            android:layout_marginStart="48dp"
+            android:textColor="@color/splash_gold"
+            android:textSize="12sp"
+            android:letterSpacing="0.06"
+            android:fontFamily="sans-serif-medium"
+            android:text="@string/loading_prefix" />
+
+    </FrameLayout>
+
+    <!-- Topmost: shown/hidden independently of the splash sequence above, whenever the WebView
+         itself fails to load (MainActivity's onReceivedError) — can interrupt the video or
+         loading-screen phase at any point, or appear later if the connection drops mid-match.
+         Fully opaque, so whatever's happening underneath is irrelevant while this is up. -->
+    <LinearLayout
+        android:id="@+id/offlineOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="@color/splash_background"
+        android:visibility="gone"
+        android:padding="32dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/offline_title"
+            android:textColor="@color/splash_gold"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/offline_subtitle"
+            android:textColor="@color/splash_gold_dim"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/offlineRetryBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:paddingHorizontal="36dp"
+            android:text="@string/offline_retry"
+            android:textColor="@color/splash_background"
+            android:textStyle="bold"
+            android:backgroundTint="@color/splash_gold" />
+
+    </LinearLayout>
 
 </FrameLayout>
