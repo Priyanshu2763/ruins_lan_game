@@ -3,6 +3,7 @@ package com.wreckveil.app
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.annotation.SuppressLint
+import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Build
@@ -12,6 +13,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -39,12 +41,23 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
  * loading immediately, in parallel with the splash video baked into res/raw/splash.mp4 (a real
  * clip the user supplied, sped up 1.5x — see the app's own scratchpad notes / commit message for
  * the ffmpeg command — kept at its full original frame, not cropped: VideoView's default scaling
- * letterboxes/pillarboxes to show the whole frame instead). The reveal only happens once BOTH the
- * video has played through at least once AND the page has actually finished loading
- * (onPageFinished — the closest native-side signal to "the game is loaded correctly"; it fires
- * once the HTML document itself is ready, not once every background 3D asset fetch is done, which
- * would need a JS bridge this simple container doesn't have) — if the page is slower than the
- * video, the video loops rather than freezing on a dead last frame until it's ready.
+ * letterboxes/pillarboxes to show the whole frame instead). The video plays exactly once, then
+ * fades out — an earlier version waited for the page to finish loading too and looped the video
+ * if it hadn't, which read as a stuck/broken splash on a live device rather than "play then
+ * disappear smoothly" as asked; the WebView's own dark background (@color/splash_background)
+ * means an still-loading page underneath is never a jarring white flash either way.
+ *
+ * `AndroidBridge` (a @JavascriptInterface) lets the web client (touchControls.js) lock/unlock
+ * screen orientation NATIVELY instead of through the browser Fullscreen+Orientation-Lock APIs —
+ * added after a live report ("app isn't opening in landscape") traced to those web APIs simply
+ * not working inside a bare WebView: `screen.orientation.lock()` is spec-gated behind a successful
+ * `Element.requestFullscreen()` first, and generic-element fullscreen in Android WebView requires
+ * the host app to implement `WebChromeClient.onShowCustomView`, which this app never did (that
+ * callback exists for `<video>` fullscreen, not arbitrary DOM fullscreen) — so the whole chain
+ * silently no-ops and the .catch() swallows it. `Activity.requestedOrientation` has no such
+ * dependency and just works, so the web client now calls this bridge (in addition to, not instead
+ * of, the browser APIs it already tries — harmless where the bridge doesn't exist, i.e. a normal
+ * mobile browser tab).
  */
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -55,9 +68,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var splashVideo: VideoView
 
-    private var videoPlayedThrough = false
-    private var pageReady = false
     private var revealed = false
+
+    // Exposed to the page as `window.AndroidBridge` — see the class doc comment above for why
+    // this exists instead of relying on the browser's own Fullscreen/Orientation-Lock APIs.
+    // Methods are deliberately narrow (orientation only, no filesystem/data access) since anything
+    // exposed here is callable by whatever content the WebView happens to be showing.
+    private inner class WebAppInterface {
+        @JavascriptInterface
+        fun lockLandscape() {
+            runOnUiThread { requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE }
+        }
+        @JavascriptInterface
+        fun unlockOrientation() {
+            runOnUiThread { requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -89,6 +115,8 @@ class MainActivity : AppCompatActivity() {
         val isDebuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         if (isDebuggable) WebView.setWebContentsDebuggingEnabled(true)
 
+        webView.addJavascriptInterface(WebAppInterface(), "AndroidBridge")
+
         webView.webViewClient = object : WebViewClient() {
             // Keep normal navigation (and the auth/dashboard flow, which is all same-origin)
             // inside the WebView; only hand off truly external links (if any ever appear) to a
@@ -103,21 +131,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            override fun onPageFinished(view: WebView, url: String?) {
-                super.onPageFinished(view, url)
-                pageReady = true
-                tryRevealGame()
-            }
-
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 super.onReceivedError(view, request, error)
                 if (request.isForMainFrame) {
                     webView.loadUrl("about:blank")
                     swipeRefresh.isEnabled = true
-                    // Don't leave the splash spinning forever over a page that will never finish
-                    // loading — reveal the retry screen instead once the video's had its play.
-                    pageReady = true
-                    tryRevealGame()
                 }
             }
         }
@@ -140,25 +158,14 @@ class MainActivity : AppCompatActivity() {
     private fun setUpSplashVideo() {
         val uri = Uri.parse("android.resource://$packageName/${R.raw.splash}")
         splashVideo.setVideoURI(uri)
-        splashVideo.setOnCompletionListener {
-            if (!videoPlayedThrough) {
-                videoPlayedThrough = true
-                tryRevealGame()
-            }
-            if (!revealed) {
-                // The game isn't ready yet — loop instead of freezing on a dead last frame.
-                splashVideo.seekTo(0)
-                splashVideo.start()
-            }
-        }
+        splashVideo.setOnCompletionListener { revealGame() }
         splashVideo.start()
     }
 
-    // Reveals the loaded game underneath only once the splash video has played through in full
-    // AND the page has actually finished loading — whichever of the two finishes second is what
-    // triggers this (both call sites are harmless no-ops until both flags are true).
-    private fun tryRevealGame() {
-        if (revealed || !videoPlayedThrough || !pageReady) return
+    // Plays exactly once, then fades out to reveal the game loading underneath (which started
+    // loading back in onCreate, in parallel with the video — see the class doc comment).
+    private fun revealGame() {
+        if (revealed) return
         revealed = true
         splashVideo.animate()
             .alpha(0f)
