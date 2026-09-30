@@ -50,14 +50,16 @@ function buildTouchControls() {
 
   // ---- Action buttons ---- (no weapon-switch button — see the weapon-card tap handler below,
   // which replaces it with real BGMI-style tap-a-card switching on the existing #weaponBar)
-  const fireBtn = makeButton('tcFire', 'tcBtnLg', 'FIRE');
+  // Labels are '' across the board now — real button art (public/images/tc*.png, wired in via
+  // CSS background-image on each button's own id) already has its name baked into the badge
+  // itself (FIRE/JUMP/CROUCH/PRONE/RELOAD/GRENADE/ADS), so plain text here would just double up.
+  const fireBtn = makeButton('tcFire', 'tcBtnLg', '');
   const jumpBtn = makeButton('tcJump', 'tcBtnSm', '');
-  jumpBtn.classList.add('tcJumpIcon');
-  const crouchBtn = makeButton('tcCrouch', 'tcBtnSm', 'CR');
-  const proneBtn = makeButton('tcProne', 'tcBtnSm', 'PR');
-  const reloadBtn = makeButton('tcReload', 'tcBtnSm', 'RLD');
-  const grenadeBtn = makeButton('tcGrenade', 'tcBtnSm', 'GRN');
-  const adsBtn = makeButton('tcAds', 'tcBtnSm', 'ADS');
+  const crouchBtn = makeButton('tcCrouch', 'tcBtnSm', '');
+  const proneBtn = makeButton('tcProne', 'tcBtnSm', '');
+  const reloadBtn = makeButton('tcReload', 'tcBtnSm', '');
+  const grenadeBtn = makeButton('tcGrenade', 'tcBtnSm', '');
+  const adsBtn = makeButton('tcAds', 'tcBtnSm', '');
   const grenadeBadge = document.createElement('span');
   grenadeBadge.id = 'tcGrenadeBadge';
   grenadeBtn.appendChild(grenadeBadge); // count shown here instead of a separate weapon-bar card, see below

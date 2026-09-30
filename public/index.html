@@ -361,14 +361,25 @@
      area with nothing purpose-built on top of it fall through to whatever's actually there. */
   #touchControls { position: fixed; inset: 0; z-index: 3; touch-action: none; pointer-events: none; }
   #touchControls > * { pointer-events: auto; }
+  /* Real button art (public/images/tc*.png — user-supplied, background-removed) replaces the old
+     CSS/SVG-only circles; background-size:cover fills the whole (already circular, transparent-
+     cornered) button with it, border-radius:50% still clips any residual square corner cleanly.
+     border/background here now only matter as a fallback for the brief instant before the image
+     decodes, not as the button's actual visible face. */
   .tcBtn { position: absolute; border-radius: 50%; border: 1px solid #4a4232; background: rgba(20,18,14,0.72);
+    background-size: cover; background-position: center; background-repeat: no-repeat;
     display: flex; align-items: center; justify-content: center; font: 700 11px system-ui, sans-serif;
     color: #d8c98a; touch-action: none; user-select: none; -webkit-user-select: none; }
-  .tcBtn:active { background: rgba(42,36,20,0.9); border-color: #b3924a; }
+  .tcBtn:active { border-color: #b3924a; }
   .tcBtnLg { width: 84px; height: 84px; font-size: 13px; color: #e8c65a; border-color: #b3924a; }
-  #tcFire { background: rgba(60,18,18,0.55); }
   .tcBtnSm { width: 54px; height: 54px; }
-  .tcJumpIcon::before { content: ''; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 12px solid #d8c98a; }
+  #tcFire { background-image: url('/images/tcFire.png'); }
+  #tcJump { background-image: url('/images/tcJump.png'); }
+  #tcCrouch { background-image: url('/images/tcCrouch.png'); }
+  #tcProne { background-image: url('/images/tcProne.png'); }
+  #tcReload { background-image: url('/images/tcReload.png'); }
+  #tcGrenade { background-image: url('/images/tcGrenade.png'); }
+  #tcAds { background-image: url('/images/tcAds.png'); }
   /* Grenade count badge (#tcGrenadeBadge, kept in sync by weapons.js's updateWeaponBar) — replaces
      the separate weapon-bar grenade card on mobile per the explicit ask ("just write the count in
      the grenade button"). .tcGrenadeEquipped is a visual cue while a grenade is in-hand
