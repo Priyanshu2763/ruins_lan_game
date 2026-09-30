@@ -181,34 +181,53 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
+    // TextureView creates its SurfaceTexture as soon as it's attached+laid out, independent of
+    // whether a listener is set — and onSurfaceTextureAvailable fires exactly ONCE, at that
+    // creation moment. Real bug found from a live report ("banner plays, then stuck on black, no
+    // video"): this used to unconditionally wait for that callback, which was fine when
+    // setUpSplashVideo() ran immediately in onCreate (the surface hadn't been created yet, so the
+    // listener was in place in time) — but now it's only called ~2.5s later, after the banner
+    // sequence, by which point the surface was already created with no listener attached to catch
+    // it. That one-time event was gone forever, so the callback never fired again and the
+    // MediaPlayer was never even created. Fixed by checking isAvailable first and using the
+    // already-existing SurfaceTexture directly in that (now-common) case, falling back to the
+    // listener only for the genuine edge case where the surface truly isn't ready yet.
     private fun setUpSplashVideo() {
-        splashVideo.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, availW: Int, availH: Int) {
-                val mp = MediaPlayer()
-                mediaPlayer = mp
-                try {
-                    mp.setSurface(Surface(surface))
-                    val afd = resources.openRawResourceFd(R.raw.splash)
-                    mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-                    afd.close()
-                    mp.setOnPreparedListener {
-                        sizeSplashVideoToAspect(mp.videoWidth, mp.videoHeight, availW, availH)
-                        mp.start()
-                        // Fades in rather than snapping to visible — a continuous "lights up" feel
-                        // picking up right where the banner's own fade-out left off, not a hard cut.
-                        splashVideo.animate().alpha(1f).setDuration(300).start()
-                    }
-                    mp.setOnCompletionListener { revealGame() }
-                    mp.setOnErrorListener { _, _, _ -> revealGame(); true }
-                    mp.prepareAsync()
-                } catch (e: Exception) {
-                    Log.e("WreckveilSplash", "splash video setup failed, revealing game directly", e)
-                    revealGame()
+        if (splashVideo.isAvailable) {
+            startVideoPlayback(splashVideo.surfaceTexture!!, splashVideo.width, splashVideo.height)
+        } else {
+            splashVideo.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, availW: Int, availH: Int) {
+                    startVideoPlayback(surface, availW, availH)
                 }
+                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
+                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
             }
-            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+        }
+    }
+
+    private fun startVideoPlayback(surface: SurfaceTexture, availW: Int, availH: Int) {
+        val mp = MediaPlayer()
+        mediaPlayer = mp
+        try {
+            mp.setSurface(Surface(surface))
+            val afd = resources.openRawResourceFd(R.raw.splash)
+            mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+            afd.close()
+            mp.setOnPreparedListener {
+                sizeSplashVideoToAspect(mp.videoWidth, mp.videoHeight, availW, availH)
+                mp.start()
+                // Fades in rather than snapping to visible — a continuous "lights up" feel picking
+                // up right where the banner's own fade-out left off, not a hard cut.
+                splashVideo.animate().alpha(1f).setDuration(300).start()
+            }
+            mp.setOnCompletionListener { revealGame() }
+            mp.setOnErrorListener { _, _, _ -> revealGame(); true }
+            mp.prepareAsync()
+        } catch (e: Exception) {
+            Log.e("WreckveilSplash", "splash video setup failed, revealing game directly", e)
+            revealGame()
         }
     }
 
