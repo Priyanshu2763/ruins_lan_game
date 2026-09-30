@@ -409,6 +409,14 @@
   #tcChatBtn { top: 128px; left: 10px; } /* directly under the mobile-shrunk minimap's box (top:10px + height:110px + gap, see @media below) */
   #tcDoneBtn { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); padding: 8px 22px; border-radius: 6px; border: 1px solid #b3924a; background: rgba(42,36,20,0.95); color: #e8c65a; font-weight: 700; z-index: 4; }
   .tcCustomizing .tcBtn, .tcCustomizing .tcJoystickBase { outline: 2px dashed #e8c65a; outline-offset: 2px; }
+  /* Stronger, distinct highlight for whichever ONE control is currently selected for resizing —
+     needs to read as clearly different from every other control's generic "you're in edit mode,
+     you COULD drag this" dashed outline above. */
+  .tcSelected { outline: 3px solid #e8c65a !important; outline-offset: 3px; box-shadow: 0 0 12px rgba(232,198,90,0.7); }
+  /* Below #tcDoneBtn (top:12px + its own ~38px height + a gap), same top-center placement — hidden
+     (see touchControls.js's onControlSelected) until a control is actually selected, so it's never
+     shown floating there with nothing to act on. */
+  #tcSizeSlider { position: absolute; top: 58px; left: 50%; transform: translateX(-50%); width: 200px; z-index: 4; accent-color: #e8c65a; }
   #rotateOverlay { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; text-align: center; padding: 40px; background: #10100e; color: #d8c98a; font-size: 18px; }
 
   /* First @media query in the project — same signal touchDetect.js's isTouchDevice() uses

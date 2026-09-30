@@ -15,7 +15,7 @@ import {
 } from './weapons.js';
 import { isGrenadeBusy } from './viewmodel.js';
 import { pauseMenu, openChat, closeChat, registerTouchLockHandlers, showScoreboard, hideScoreboard } from './ui.js';
-import { loadTouchLayout, makeDraggable, makeLookZoneHandleDraggable, getLookZoneLeftPct, exitCustomizeMode } from './touchLayout.js';
+import { loadTouchLayout, makeDraggable, makeLookZoneHandleDraggable, getLookZoneLeftPct, exitCustomizeMode, onControlSelected, setSelectedScale } from './touchLayout.js';
 
 if (isTouchDevice()) buildTouchControls();
 
@@ -147,6 +147,31 @@ function buildTouchControls() {
   doneBtn.hidden = true;
   root.appendChild(doneBtn);
   doneBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); exitCustomizeMode(); }, { passive: false });
+
+  // ---- BGMI-style size slider: tap any control in customize mode (touchLayout.js's makeDraggable
+  // distinguishes a tap from a drag) to select it, this ONE shared slider resizes whichever
+  // control is currently selected — replaces a per-button +/- stepper pair, which would have
+  // meant 14 extra small tap targets cluttering an already-small screen for 7 buttons. Hidden
+  // until something is selected (onControlSelected below), so it never appears with nothing to
+  // act on. `input` applies the size live (matches the position-drag's own live-preview feel);
+  // `change` (fires once, on release) is what actually persists it — same "preview live, save on
+  // release" split already used for dragging, so a mid-drag slider tick never spams a network save.
+  const sizeSlider = document.createElement('input');
+  sizeSlider.id = 'tcSizeSlider';
+  sizeSlider.type = 'range';
+  sizeSlider.min = '60'; sizeSlider.max = '180'; sizeSlider.step = '5';
+  sizeSlider.hidden = true;
+  root.appendChild(sizeSlider);
+  sizeSlider.addEventListener('input', () => setSelectedScale(Number(sizeSlider.value) / 100, false));
+  sizeSlider.addEventListener('change', () => setSelectedScale(Number(sizeSlider.value) / 100, true));
+  // touchLayout.js owns selection state (it's the thing that knows which control was tapped) and
+  // calls back here with the DOM-facing side of it — this file never reaches into touchLayout.js's
+  // internals beyond the small exported API, matching how touchControls.js/touchLayout.js already
+  // divide "builds the controls" from "owns the layout data" everywhere else in this pair of files.
+  onControlSelected((key, scale) => {
+    sizeSlider.hidden = !key;
+    if (key) sizeSlider.value = String(Math.round(scale * 100));
+  });
 
   // A slipped thumb / an interrupted gesture (incoming call, OS back-swipe) has the same failure
   // mode as alt-tab losing Pointer Lock on desktop — pointercancel on each control covers the

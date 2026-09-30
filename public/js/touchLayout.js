@@ -73,6 +73,12 @@ function applyPosition(el, key) {
   else if (p.anchor === 'br') { el.style.right = `${p.x}px`; el.style.bottom = `${p.y}px`; }
   else if (p.anchor === 'tl') { el.style.left = `${p.x}px`; el.style.top = `${p.y}px`; }
   else { el.style.right = `${p.x}px`; el.style.top = `${p.y}px`; }
+  // transform:scale keeps the anchor point fixed (default transform-origin is the element's own
+  // center, which for a circular button sitting at a fixed left/top/right/bottom is exactly what
+  // "grow/shrink in place" needs) and correctly resizes the actual hit-tested tap area too, not
+  // just the paint — modern browsers hit-test pointer events against an element's post-transform
+  // visual bounds, so a scaled-up button is genuinely easier to tap, not just easier to see.
+  el.style.transform = p.scale && p.scale !== 1 ? `scale(${p.scale})` : '';
 }
 
 export function resetTouchLayout() {
@@ -81,6 +87,7 @@ export function resetTouchLayout() {
   for (const [key, el] of registry) applyPosition(el, key);
   const zone = document.getElementById('tcLookZone');
   if (zone) zone.style.left = `${liveLayout.lookZoneLeftPct}%`;
+  if (selectedKey) selectControl(selectedKey); // refresh the slider to the just-restored default scale
 }
 
 // Called once per control by touchControls.js at build time. Registers the element, applies its
@@ -98,18 +105,19 @@ export function makeDraggable(el, key) {
   // control's layout offset): `pointerStartX/Y` is where the finger first touched down (raw
   // screen pixels), `layoutStartX/Y` is the control's own anchor-offset position at that same
   // instant — the drag adds the finger's delta onto the LATTER, never confusing the two.
-  let drag = null; // { pointerId, pointerStartX, pointerStartY, layoutStartX, layoutStartY }
+  let drag = null; // { pointerId, pointerStartX, pointerStartY, layoutStartX, layoutStartY, moved }
   el.addEventListener('pointerdown', (e) => {
     if (!state.touchCustomizing) return;
     e.preventDefault();
     e.stopPropagation(); // don't let this pointerdown also reach the control's gameplay handler
     el.setPointerCapture(e.pointerId);
     const p = liveLayout[key];
-    drag = { pointerId: e.pointerId, pointerStartX: e.clientX, pointerStartY: e.clientY, layoutStartX: p.x, layoutStartY: p.y };
+    drag = { pointerId: e.pointerId, pointerStartX: e.clientX, pointerStartY: e.clientY, layoutStartX: p.x, layoutStartY: p.y, moved: false };
   }, { passive: false });
   el.addEventListener('pointermove', (e) => {
     if (!drag || e.pointerId !== drag.pointerId) return;
     const dx = e.clientX - drag.pointerStartX, dy = e.clientY - drag.pointerStartY;
+    if (Math.hypot(dx, dy) > 6) drag.moved = true; // past a small slop -> a real drag, not a tap (see `end` below)
     const p = liveLayout[key];
     // Anchor-relative deltas: moving right/down INCREASES x/y for a left/top anchor but
     // DECREASES it for a right/bottom anchor (since x/y are measured from that far edge).
@@ -121,13 +129,44 @@ export function makeDraggable(el, key) {
   });
   const end = (e) => {
     if (!drag || e.pointerId !== drag.pointerId) return;
+    const wasTap = !drag.moved;
     drag = null;
     saveTouchLayout(liveLayout);
+    // A tap (no real drag) selects this control for the BGMI-style size slider instead of
+    // repositioning it — the joystick is excluded (see DEFAULT_TOUCH_LAYOUT's own comment on why
+    // it isn't resizable yet), so tapping it still only ever drags, never selects.
+    if (wasTap && key !== 'joystick') selectControl(key);
   };
   el.addEventListener('pointerup', end);
   el.addEventListener('pointercancel', end);
 }
 function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }
+
+// ---- BGMI-style size slider: tap a control (above) to select it, one shared slider (built by
+// touchControls.js) resizes whichever control is currently selected. ----
+let selectedKey = null;
+const selectListeners = new Set();
+// fn(key, scale) on selection, fn(null, 1) on deselect — touchControls.js uses this to show/hide
+// and position the slider without touchLayout.js needing to know anything about that DOM.
+export function onControlSelected(fn) { selectListeners.add(fn); }
+function selectControl(key) {
+  if (selectedKey && registry.has(selectedKey)) registry.get(selectedKey).classList.remove('tcSelected');
+  selectedKey = key;
+  if (key && registry.has(key)) registry.get(key).classList.add('tcSelected');
+  const scale = key ? liveLayout[key].scale : 1;
+  for (const fn of selectListeners) fn(key, scale);
+}
+export function deselectControl() { selectControl(null); }
+// `persist` is false while the slider is still being dragged (live visual feedback only, same
+// "update live, save on release" split the position-drag above already uses) and true on the
+// slider's own 'change' event (fires once, on release) — avoids spamming a network save on every
+// intermediate slider tick.
+export function setSelectedScale(scale, persist) {
+  if (!selectedKey) return;
+  liveLayout[selectedKey].scale = clamp(scale, 0.6, 1.8);
+  applyPosition(registry.get(selectedKey), selectedKey);
+  if (persist) saveTouchLayout(liveLayout);
+}
 
 // Look-zone boundary drag: a thin vertical handle (built by touchControls.js) that only adjusts
 // lookZoneLeftPct on horizontal drag, clamped to a sane range so the zone can't be dragged to
@@ -167,6 +206,7 @@ export function enterCustomizeMode() {
 }
 export function exitCustomizeMode() {
   state.touchCustomizing = false;
+  deselectControl(); // hides the size slider and clears the selected-control highlight for next time
   // Real bug found via user report: customize mode was reachable from the pause menu, whose OWN
   // "Edit Touch Controls" button already set state.controlsActive = false as part of pausing (see
   // touchControls.js's pauseTouchControls). Nothing on the way back OUT restored it — exiting via
