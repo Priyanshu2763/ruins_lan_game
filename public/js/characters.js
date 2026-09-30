@@ -489,10 +489,17 @@ function buildOperatorFigure(appearance) {
     // Not loaded yet: kick off the (lazy, per-id — these are ~5-60MB each, not worth eager-loading
     // all 8 for players who never touch Operators mode) load in the background and let the caller
     // retry, same "return null, try again next tick" contract buildCharacterFigure already has
-    // while the Quaternius template itself is still loading.
+    // while the Quaternius template itself is still loading. loadOperator now retries on its own
+    // (see its own comment — a live report traced to exactly this gap: no retry meant one flaky
+    // fetch over a real network permanently left a player's gun/hands invisible), but the retries
+    // still take real time and can still ultimately fail — .catch() here just logs instead of
+    // leaving an unhandled rejection; the player already has a "no rig this tick" empty-handed
+    // fallback via the null return, same as the ordinary still-loading case.
     if (template) loadOperator(opId, () => cloneSkinned(template.scenes.male), template.clips).then(() => {
       retryPendingCreates();
       for (const fn of operatorReadyCallbacks) fn();
+    }).catch((err) => {
+      console.error(`giving up on operator "${opId}" after retries — gun/hands will stay empty for anyone using it this session:`, err);
     });
     return null;
   }

@@ -74,33 +74,57 @@ function mergeSkeletons(root) {
 // previous clip instead of true bind pose, corrupting every retarget after the first. `srcClips`
 // = Map<name, AnimationClip> from that same (already-loaded) template. Both supplied by
 // characters.js so this module never has to import it.
-export async function loadOperator(id, makeSrcModel, srcClips) {
+async function loadOperatorOnce(id, makeSrcModel, srcClips) {
+  const model = await fbxLoader.loadAsync(`/models/operators/${id}.fbx`);
+  mergeSkeletons(model);
+  model.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(model);
+  const size = box.getSize(new THREE.Vector3());
+  const s = TARGET_HEIGHT / size.y;
+  model.scale.setScalar(s);
+  model.position.y -= box.min.y * s; // feet at y=0, matching how the Quaternius bodies are set up
+  model.updateMatrixWorld(true);
+  const clips = new Map();
+  for (const name of CLIP_NAMES) {
+    const src = srcClips.get(name);
+    const rt = src && retargetClip(src, makeSrcModel(), model);
+    if (rt) clips.set(name, rt);
+  }
+  let bodyMesh = null, maxVerts = -1; const allMeshes = [];
+  model.traverse((o) => { if (o.isSkinnedMesh) { allMeshes.push(o); o.frustumCulled = false; const n = o.geometry.attributes.position.count; if (n > maxVerts) { maxVerts = n; bodyMesh = o; } } });
+  const garmentNames = new Set(GARMENT_MESHES[id] || []);
+  const garmentMeshNames = allMeshes.filter((m) => garmentNames.has(m.name)).map((m) => m.name);
+  const t = { model, clips, bodyMesh, allMeshes, garmentMeshNames };
+  templates.set(id, t);
+  return t;
+}
+
+// Real bug found from a live report ("gun/hand invisible when I create a room, but fine when I
+// join one"): these FBX files are 5-62MB, fetched over a real LAN/WiFi connection (not this dev
+// box's near-instant localhost) — a single dropped/failed request was enough to permanently break
+// that operator for the rest of the page's life. Unlike loadTemplate (the shared Quaternius/gun/
+// hair template, which already retries 3x — see loadTemplateWithRetry's own comment on exactly
+// this failure class), loadOperator had NO retry: a rejected promise, and `loading` still held
+// onto THAT SAME rejected promise forever, so every later attempt (a different room, a different
+// match) kept re-rejecting instantly with no new fetch ever attempted. A create-then-immediately-
+// spawn is the first real chance for this operator's fetch to run this page session (cold), while
+// a join tends to happen later/after a retry-friendly reload — which is why it read as
+// create-specific rather than the flaky-network bug it actually is.
+async function loadOperatorWithRetry(id, makeSrcModel, srcClips, attempt = 1) {
+  try {
+    return await loadOperatorOnce(id, makeSrcModel, srcClips);
+  } catch (err) {
+    console.error(`operator "${id}" model load failed (attempt ${attempt}/3):`, err);
+    if (attempt >= 3) { loading.delete(id); throw err; }
+    await new Promise((r) => setTimeout(r, attempt * 1500));
+    return loadOperatorWithRetry(id, makeSrcModel, srcClips, attempt + 1);
+  }
+}
+
+export function loadOperator(id, makeSrcModel, srcClips) {
   if (templates.has(id)) return templates.get(id);
   if (loading.has(id)) return loading.get(id);
-  const p = (async () => {
-    const model = await fbxLoader.loadAsync(`/models/operators/${id}.fbx`);
-    mergeSkeletons(model);
-    model.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    const s = TARGET_HEIGHT / size.y;
-    model.scale.setScalar(s);
-    model.position.y -= box.min.y * s; // feet at y=0, matching how the Quaternius bodies are set up
-    model.updateMatrixWorld(true);
-    const clips = new Map();
-    for (const name of CLIP_NAMES) {
-      const src = srcClips.get(name);
-      const rt = src && retargetClip(src, makeSrcModel(), model);
-      if (rt) clips.set(name, rt);
-    }
-    let bodyMesh = null, maxVerts = -1; const allMeshes = [];
-    model.traverse((o) => { if (o.isSkinnedMesh) { allMeshes.push(o); o.frustumCulled = false; const n = o.geometry.attributes.position.count; if (n > maxVerts) { maxVerts = n; bodyMesh = o; } } });
-    const garmentNames = new Set(GARMENT_MESHES[id] || []);
-    const garmentMeshNames = allMeshes.filter((m) => garmentNames.has(m.name)).map((m) => m.name);
-    const t = { model, clips, bodyMesh, allMeshes, garmentMeshNames };
-    templates.set(id, t);
-    return t;
-  })();
+  const p = loadOperatorWithRetry(id, makeSrcModel, srcClips);
   loading.set(id, p);
   return p;
 }
