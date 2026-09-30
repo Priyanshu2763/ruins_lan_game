@@ -1,7 +1,5 @@
 <resources>
     <!-- Rough match to the web client's own dark/gold palette (see index.html's panel styling) -
-         a placeholder until real splash artwork replaces this screen outright. -->
+         the app window/icon background and the letterbox color around the splash video. -->
     <color name="splash_background">#14120E</color>
-    <color name="splash_wordmark">#D9B36C</color>
-    <color name="splash_subtitle">#8A8478</color>
 </resources>

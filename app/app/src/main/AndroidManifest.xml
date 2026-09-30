@@ -20,47 +20,34 @@
         android:usesCleartextTraffic="false">
 
         <!--
-          This app is currently just an outer container: a splash screen (placeholder, real
-          branding to follow) and a full-screen WebView pointed at the live game
-          (see MainActivity.GAME_URL). No native game logic lives here — the whole game keeps
-          running exactly as it does in a desktop browser, this just gives it an installable,
-          app-icon-on-the-home-screen wrapper.
+          This app is currently just an outer container: a splash video (baked into
+          res/raw/splash.mp4) plays over a full-screen WebView pointed at the live game
+          (see MainActivity.GAME_URL), which starts loading in parallel underneath it — no
+          separate splash Activity/delay, see MainActivity's own comment for why. No native game
+          logic lives here — the whole game keeps running exactly as it does in a desktop
+          browser, this just gives it an installable, app-icon-on-the-home-screen wrapper.
+
+          screenOrientation is "unspecified" (free sensor rotation, respecting the user's own
+          system rotation-lock setting), not locked — a live report traced "login/create buttons
+          not working" on a real phone to a previous "userLandscape" lock here cramming the login
+          form off the bottom of a short landscape viewport (measured: the Create Account button's
+          bottom edge sat past the bottom of a realistic 780x360 phone viewport). The web client
+          already has its own orientation handling (#rotateOverlay, touchControls.js's
+          screen.orientation.lock('landscape')) that only locks to landscape once a real match
+          starts, leaving menus/login in the phone's natural portrait — exactly what unspecified
+          here lets happen, matching how a normal mobile browser tab already behaves.
         -->
         <activity
-            android:name=".SplashActivity"
+            android:name=".MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.Wreckveil.Splash"
-            android:screenOrientation="unspecified">
+            android:screenOrientation="unspecified"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Wreckveil">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!--
-          Real bug found from a live report: login/create buttons "not working" on a real phone.
-          screenOrientation used to be "userLandscape" here, forcing landscape from the very first
-          frame — including the login form, which the web client (public/index.html/ui.js) was
-          never designed to be viewed in: it already has its OWN orientation handling
-          (#rotateOverlay, touchControls.js's screen.orientation.lock('landscape')) that
-          deliberately only locks to landscape once an actual MATCH starts, leaving menus/login in
-          whatever orientation the phone is naturally held in (portrait, for comfortable typing).
-          Measured directly (headless Chrome at realistic short-landscape phone dimensions,
-          780x360 CSS px): the "Create Account" button's bottom edge sits AT/PAST the bottom of
-          that viewport (bottom=360.6 in a 360px-tall viewport) — clipped/unreachable, with "Log
-          In" sitting uncomfortably tight against the same edge. "unspecified" (the normal Android
-          default: free sensor rotation, respecting the user's own system rotation-lock setting)
-          lets the login/dashboard render in the phone's natural portrait orientation, where the
-          same layout has comfortable room (verified: fully in-viewport at a 400x850 portrait
-          check) — and the web client's own existing JS still locks to landscape once real
-          gameplay starts, exactly as it already does for a normal mobile browser tab.
-        -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="false"
-            android:screenOrientation="unspecified"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:theme="@style/Theme.Wreckveil" />
 
     </application>
 </manifest>

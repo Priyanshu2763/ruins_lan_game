@@ -1,12 +1,7 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
+<resources>
     <style name="Theme.Wreckveil" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">@color/splash_background</item>
         <item name="android:navigationBarColor">@color/splash_background</item>
         <item name="android:windowBackground">@color/splash_background</item>
-    </style>
-
-    <style name="Theme.Wreckveil.Splash" parent="Theme.Wreckveil">
-        <item name="android:windowNoTitle">true</item>
-        <item name="android:windowFullscreen" tools:targetApi="34">true</item>
     </style>
 </resources>
